@@ -1,0 +1,22 @@
+---
+description: Project context for misinformation_agenticai (always applied)
+alwaysApply: true
+---
+
+This repo builds an agentic AI misinformation detector for Indian content (English text, URLs,
+images). The full design is in `docs/ARCHITECTURE.md` — read it before any task. "Box N" in any
+prompt, issue or comment refers to the 16 boxes defined there.
+
+Core principle: the LLM reads and writes; evidence and explicit rules decide the verdict. Say
+"Unverifiable" when two independent credible sources cannot be found.
+
+Hard rules:
+- Package is `misinfo_agent/`; shared state is `ClaimState` in `misinfo_agent/state.py`. Do not change
+  `state.py`, `config.py` or `requirements.txt` unless the task explicitly says so.
+- All LLM calls go through `misinfo_agent/llm.py`; validate LLM output with Pydantic.
+- Data lives in `data/` (gitignored). Never commit it. Read parquet with `columns=[...]`; never load the
+  `content` column unless the task needs it. Never build an N x N similarity matrix over the memory.
+- Never print, log or commit API keys; they live in `.env`.
+- Deeply commented code that explains WHY. Add tests in `tests/`; run `pytest` before finishing.
+- Work only on the current feature branch; never push to `main`.
+- When a prompt has stages with STOP, stop after each stage and report.
