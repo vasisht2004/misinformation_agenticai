@@ -63,13 +63,15 @@ claims in the same style so they match the memory.
 | 7 Investigate | `investigate.py` | Vash | Fixed query plan (support + refute + official-site queries, domain-routed) + optional agent top-up; fetch pages; pick passages; stance (supports/refutes/neutral); credibility (tier, independence via MinHash, freshness) → evidence table E1…En | Tavily, trafilatura, BGE-M3, Gemini (1 batched stance call), rules | **1–3 calls** |
 | 9 Gate | `gate.py` | Vash | Rules: ≥2 independent groups agree, ≥1 Tier 1–2, no Tier-1 disagreement → sufficient; credible conflict → human; else search_more (max 2) then insufficient | rules | no |
 | 8+10 Assess | `assess.py` | Vash | One call: per-atomic-claim results, explanation, true_version, correction message, cited evidence IDs only. Code applies the verdict rule, checks citations exist, computes confidence from evidence features | Gemini, rules, (later) logistic-regression calibration | **1 call** |
-| 11 Priority | `priority.py` | ingestion teammate | Score from harm (domain, red flags), novelty (1 − top memory cosine), reach (also_debunked_by / repeat submissions), urgency (deadline words) → High/Medium/Low. Weights hand-set + sensitivity check | rules | no |
-| 12 Decide | `decide.py` | ingestion teammate | EVSI-inspired rule: alert / search_more / human / store, using harm-dependent threshold p* = a/(a+bH) | rules | no |
-| 13 Human review | `review.py` | third teammate | LangGraph `interrupt()` pauses; Streamlit review queue (approve / edit / reject / more evidence) resumes with `Command(resume=...)` | LangGraph, Streamlit | no |
-| 14–15 Output | `output.py` | third teammate | Result card (verdict, confidence, evidence, seen-before, red flags, true version, correction, limits); alerts page; email/webhook stub | Streamlit | no |
-| 16 Audit | `audit.py` | third teammate | One SQLite row per run (input, evidence, verdict, human action, LLM/search calls, latency, model + prompt version); approved verdicts appended to memory | SQLite | no |
+| 11 Priority | `priority.py` | Vash | Score from harm (domain, red flags), novelty (1 − top memory cosine), reach (also_debunked_by / repeat submissions), urgency (deadline words) → High/Medium/Low. Weights hand-set + sensitivity check | rules | no |
+| 12 Decide | `decide.py` | Vash | EVSI-inspired rule: alert / search_more / human / store, using harm-dependent threshold p* = a/(a+bH) | rules | no |
+| 13 Human review | `review.py` | Vash | LangGraph `interrupt()` pauses; Streamlit review queue (approve / edit / reject / more evidence) resumes with `Command(resume=...)` | LangGraph, Streamlit | no |
+| 14–15 Output | `output.py` | Vash | Result card (verdict, confidence, evidence, seen-before, red flags, true version, correction, limits); alerts page; email/webhook stub | Streamlit | no |
+| 16 Audit | `audit.py` | Vash | One SQLite row per run (input, evidence, verdict, human action, LLM/search calls, latency, model + prompt version); approved verdicts appended to memory | SQLite | no |
 | Wiring | `graph.py` | Vash | LangGraph StateGraph: nodes = boxes, conditional edges at boxes 6, 9, 12; checkpointer (SQLite); recursion limit | LangGraph | — |
-| LLM access | `llm.py` | ingestion teammate | The ONLY place LLM calls happen; provider/model set in config; retries; call counting | langchain-google-genai | — |
+| LLM access | `llm.py` | Vash | The ONLY place LLM calls happen; provider/model set in config; retries; call counting | langchain-google-genai | — |
+
+`ingest.py` and `extract.py` must fill their `state.py` fields exactly; extract's domain must be one of `config.DOMAINS`; extract calls the LLM only through `llm.call_structured`; test against `tests/fixtures/sample_state.json`.
 
 Typical cost per claim: **3–6 LLM calls, ~5–7 searches, ~40 s.**
 
