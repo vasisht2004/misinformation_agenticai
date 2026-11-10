@@ -3,10 +3,10 @@
 Thresholds propose exact / similar / none from the best dense cosine.
 They do not get the last word. A ₹500 claim must not reuse a ₹2000
 fact-check just because the sentences are otherwise the same, and a status
-("approved", "banned", "invalid") goes stale. The model is not asked.
-llm_context_check is the hook for a later call, and it is not called:
-a model opinion here would be an LLM use outside llm.py, and the route
-would no longer be a rule.
+("approved", "banned", "invalid") goes stale. The model is asked, through llm.call_structured, only when the rules have
+left the pair exact. It can veto that exact. It cannot create one. If the
+call fails, the pair is similar and is checked fresh: a missing key or a
+timeout must not be reused as a yes.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from misinfo_agent.config import (
     BM25_PATH,
     COMMUNITY_TERMS,
+    KEYTERM_SIM,
     LLM_CONTEXT_CHECK,
     STATUS_KEYWORDS,
     STALE_DAYS,
@@ -28,15 +29,11 @@ from misinfo_agent.config import (
     TAU_LOW,
 )
 from misinfo_agent.llm import call_structured
-
-# Word-similarity floor for the paired-term rule. A missing key term whose
-# nearest word in the other claim is below this is a different subject.
-# 0.60 does not separate "cells" from "kills" (cosine 0.62), so the lemon
-# sentence would reuse a cancer fact-check. Stage D3 grids 0.40–0.70 and
-# the operating value is the best floor that still blocks that pair.
-# It is not TAU_HIGH. Callers pass another floor without editing this line.
-KEYTERM_SIM = 0.65
 from misinfo_agent.memory import bm25_token_pairs, strip_rupee_amounts
+
+# Shown when the veto cannot run. Exact is not kept: a failed call is not
+# evidence that the two sentences are the same claim.
+_VETO_FAILED = "The careful same-claim check could not run, so this is checked fresh."
 
 # Months are capitalised and are not names. Leaving "December" in the name
 # set makes "1 December" and "30 September" look like a place clash on top
@@ -152,7 +149,13 @@ def llm_context_check(claim: str, match: dict) -> ContextVerdict:
         "If they differ, differing_detail is that one difference, in a short phrase. "
         "If they are the same, differing_detail is null."
     )
-    return ContextVerdict.model_validate(call_structured(prompt, ContextVerdict))
+    # purpose is what box 16 records. Validation still happens here so a
+    # test double that returns a dict becomes a ContextVerdict, and a
+    # real call (already a ContextVerdict) is checked again for the same
+    # reason: this box only reads same_claim and differing_detail.
+    return ContextVerdict.model_validate(
+        call_structured(prompt, ContextVerdict, purpose="prior_match_veto")
+    )
 
 
 def decide_prior(
@@ -248,14 +251,21 @@ def decide_prior(
     # The model is a veto, not a second threshold. It runs only when every
     # rule has already left the pair exact, and only when the flag is on.
     # A similar or none result never reaches it, so the model cannot promote.
+    # A raised call is the same as a veto: exact is not kept on a failure.
     veto_note = None
     if match_type == "exact" and LLM_CONTEXT_CHECK:
-        verdict = llm_context_check(claim, best)
-        if not verdict.same_claim:
+        try:
+            verdict = llm_context_check(claim, best)
+        except Exception:
             match_type = "similar"
             downgraded = True
-            detail = (verdict.differing_detail or "").strip() or "the wording is not the same claim"
-            veto_note = f"A careful read found a difference: {detail}."
+            veto_note = _VETO_FAILED
+        else:
+            if not verdict.same_claim:
+                match_type = "similar"
+                downgraded = True
+                detail = (verdict.differing_detail or "").strip() or "the wording is not the same claim"
+                veto_note = f"A careful read found a difference: {detail}."
 
     recheck, recheck_reason = _needs_recheck(claim, best, today)
     reasons = [_closeness_sentence(best, cosine, match_type, downgraded)]

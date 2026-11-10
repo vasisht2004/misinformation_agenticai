@@ -3,7 +3,7 @@
 Why one file: a threshold or a data path that lives in two modules will drift,
 and box 6's decision will no longer mean what box 5 measured. state.py, this
 file and requirements.txt change only through a PR with a heads-up
-(CONTRIBUTING.md), because every other module imports them.
+(docs/ARCHITECTURE.md §6), because every other module imports them.
 
 Paths are anchored to this file, not to the process cwd. pytest, the CLI and
 an IDE launch from different directories; the parquet files do not move.
@@ -127,7 +127,44 @@ STATUS_KEYWORDS = [
 # do not import a provider SDK from any other file.
 LLM_PROVIDER = "gemini"
 
-# Box 6 may ask the model whether an exact pair is really the same claim.
-# Off until a key exists. A missing key must not look like a yes, and the
-# call cannot turn a similar or none into an exact.
-LLM_CONTEXT_CHECK = False
+# Used when GEMINI_MODEL is unset in .env. A pinned id, not a "latest"
+# alias: box 16 records the model name, and a moving alias would make two
+# runs incomparable. .env overrides this so the model can change without
+# a code edit. gemini-2.5-flash 404s for new keys. gemini-3.8-flash does
+# not finish inside LLM_TIMEOUT_S. The lite model answers a schema call
+# in about a second, which is what a veto needs.
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+# One call must not stall the graph. The client sends this as a timeout;
+# a hung request becomes an error the box can record, not an open wait.
+LLM_TIMEOUT_S = 60
+
+# On so a repeated pair is not billed again. The cache key includes the
+# prompt, the schema and the model, so an edited prompt is a miss, not a
+# stale answer. Files live under data/, which is gitignored.
+LLM_CACHE = True
+LLM_CACHE_DIR = DATA_DIR / "cache" / "llm"
+
+# Free-tier ceiling for real Gemini calls. Cached and fake calls do not
+# count. 150 is a starting cap, tuned to the project's own limit; the
+# gateway reads it on every real call so a change here is the whole change.
+# The day is Pacific time because that is when Gemini resets the quota.
+LLM_DAILY_MAX = 150
+# Real calls per 60 seconds in this process. 8 stays under the free-tier
+# per-minute window with a little room for the clock being wrong.
+LLM_RPM = 8
+
+# Paired-term floor. A missing key term whose nearest word on the other
+# side is below this is a different subject. 0.65 blocked "cells" against
+# "kills" (cosine 0.62) and was the old default. 0.45 does not, and on the
+# 70 labelled pairs it is the floor that the veto then cleans up: precision
+# 1 with a much higher recall. The veto, not this floor, is what stops the
+# lemon/cancer sentence and the goat/cow false exact. Callers can pass
+# another floor without editing this line.
+KEYTERM_SIM = 0.45
+
+# Box 6 asks the model whether an exact pair is really the same claim.
+# On. A missing key, a quota error, or a timeout must not look like a yes:
+# prior_match downgrades that pair to similar. The call still cannot turn
+# a similar or a none into an exact.
+LLM_CONTEXT_CHECK = True

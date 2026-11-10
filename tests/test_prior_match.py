@@ -7,8 +7,13 @@ capitalised words differ. It still must not be reused.
 
 from datetime import date
 
+from misinfo_agent.llm import clear_fake, set_fake
 from misinfo_agent.prior_match import _normalise_quantities, decide_prior, llm_context_check
 import pytest
+
+
+def _same_claim(prompt, schema, images):
+    return {"same_claim": True, "differing_detail": None}
 
 
 def _hit(primary: str, cosine: float, **extra) -> dict:
@@ -75,14 +80,23 @@ def test_old_out_of_context_image_does_not_need_recheck():
 
 
 def test_lemon_cancer_swap_is_never_exact():
-    # Top IDF on the cancer sentence is "cells", not "cancer" (cancer is
-    # common here). "cells" is not close to any word in the lemon sentence,
-    # and that is what blocks reuse at a forced 0.95.
-    decision = decide_prior(
-        "Drinking hot lemon water kills coronavirus",
-        [_hit("Drinking hot lemon water kills cancer cells", 0.95)],
-        now=date(2026, 11, 9),
+    # At the adopted floor of 0.45, "cells" vs "kills" (cosine 0.62) is not
+    # a key-term clash. The veto is what keeps the cancer sentence from
+    # being reused. The fake is that veto.
+    set_fake(
+        lambda prompt, schema, images: {
+            "same_claim": False,
+            "differing_detail": "coronavirus versus cancer cells",
+        }
     )
+    try:
+        decision = decide_prior(
+            "Drinking hot lemon water kills coronavirus",
+            [_hit("Drinking hot lemon water kills cancer cells", 0.95)],
+            now=date(2026, 11, 9),
+        )
+    finally:
+        clear_fake()
     assert decision["match_type"] != "exact"
     assert decision["match_type"] == "similar"
     text = " ".join(decision["reasons"]).lower()
@@ -92,11 +106,17 @@ def test_lemon_cancer_swap_is_never_exact():
 def test_five_lakh_matches_digit_lakh():
     assert _normalise_quantities("5 lakh") == _normalise_quantities("five lakh")
     assert _normalise_quantities("Rs. 5 lakh") == _normalise_quantities("five lakh rupees")
-    decision = decide_prior(
-        "The rally drew 5 lakh people.",
-        [_hit("The rally drew five lakh people.", 0.96)],
-        now=date(2026, 11, 9),
-    )
+    # The rules leave this exact. The veto is on, so the test has to say
+    # the two sentences are the same claim or the pair is checked fresh.
+    set_fake(_same_claim)
+    try:
+        decision = decide_prior(
+            "The rally drew 5 lakh people.",
+            [_hit("The rally drew five lakh people.", 0.96)],
+            now=date(2026, 11, 9),
+        )
+    finally:
+        clear_fake()
     assert decision["match_type"] == "exact"
     assert not any("differs" in reason for reason in decision["match_reasons"])
 
@@ -175,16 +195,22 @@ def test_percent_is_one_value_and_blocks_exact():
     assert "9 vs 2" not in text
 
 
-def test_llm_context_check_is_not_implemented():
-    with pytest.raises(NotImplementedError):
+def test_llm_context_check_without_a_key_names_the_missing_variable(monkeypatch):
+    # A blank variable must win over a filled .env. Otherwise this test
+    # would send "a claim" to the real model.
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    from misinfo_agent.llm import LLMError
+
+    with pytest.raises(LLMError) as caught:
         llm_context_check("a claim", {})
+    assert str(caught.value) == "prior_match_veto: GEMINI_API_KEY is not set in .env"
 
 
 def test_llm_veto_turns_exact_into_similar(monkeypatch):
     monkeypatch.setattr("misinfo_agent.prior_match.LLM_CONTEXT_CHECK", True)
     monkeypatch.setattr(
         "misinfo_agent.prior_match.call_structured",
-        lambda prompt, schema: {"same_claim": False, "differing_detail": "the city"},
+        lambda prompt, schema, **_kwargs: {"same_claim": False, "differing_detail": "the city"},
     )
     decision = decide_prior(
         "RBI says the note was withdrawn.",
@@ -203,7 +229,7 @@ def test_llm_veto_does_not_run_unless_the_pair_is_exact(monkeypatch):
     monkeypatch.setattr("misinfo_agent.prior_match.LLM_CONTEXT_CHECK", True)
     monkeypatch.setattr(
         "misinfo_agent.prior_match.call_structured",
-        lambda prompt, schema: calls.append(prompt),
+        lambda prompt, schema, **_kwargs: calls.append(prompt),
     )
     decide_prior(
         "A rumour about a new comet over Pune.",
@@ -218,12 +244,32 @@ def test_llm_veto_does_not_run_unless_the_pair_is_exact(monkeypatch):
     assert calls == []
 
 
+def test_veto_failure_downgrades_exact_to_similar():
+    def boom(prompt, schema, images):
+        raise TimeoutError("timed out")
+
+    set_fake(boom)
+    try:
+        decision = decide_prior(
+            "RBI says the note was withdrawn.",
+            [_hit("RBI says the note was withdrawn.", 0.96)],
+            now=date(2026, 11, 9),
+        )
+    finally:
+        clear_fake()
+    assert decision["match_type"] == "similar"
+    assert any(
+        reason == "The careful same-claim check could not run, so this is checked fresh."
+        for reason in decision["match_reasons"]
+    )
+
+
 def test_llm_veto_is_skipped_when_disabled(monkeypatch):
     calls = []
     monkeypatch.setattr("misinfo_agent.prior_match.LLM_CONTEXT_CHECK", False)
     monkeypatch.setattr(
         "misinfo_agent.prior_match.call_structured",
-        lambda prompt, schema: calls.append(prompt),
+        lambda prompt, schema, **_kwargs: calls.append(prompt),
     )
     decision = decide_prior(
         "RBI says the note was withdrawn.",
