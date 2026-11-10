@@ -1,6 +1,6 @@
 # Prior-match evaluation
 
-Box 6 decides whether a new claim is the same as a fact-check already in memory. The cosine thresholds propose exact, similar, or none. Dates, amounts, percents, years, numbers, community words, and key terms can still turn an exact match into similar. `TAU_HIGH` is 0.85 and `TAU_LOW` is 0.70, both closed (`>=`). `KEYTERM_SIM` is 0.65. None of those three was changed by the later scoring runs.
+Box 6 decides whether a new claim is the same as a fact-check already in memory. The cosine thresholds propose exact, similar, or none. Dates, amounts, percents, years, numbers, community words, and key terms can still turn an exact match into similar. `TAU_HIGH` is 0.85 and `TAU_LOW` is 0.70, both closed (`>=`). The adopted `KEYTERM_SIM` is 0.45. The tables below were scored at 0.65, before the veto.
 
 ## Test sets
 
@@ -82,10 +82,25 @@ After `9.2%` is one percent, the new-rules line at 0.85 is: n_exact 11, precisio
 
 A grid of `KEYTERM_SIM` from 0.40 to 0.70, at 0.85, peaked at F1 0.720 when the floor was 0.45. At that floor the sentence “hot lemon water kills coronavirus” against “…kills cancer cells” stayed exact, because “cells” is still close to “kills” (cosine 0.62). 0.65 is the highest-F1 floor that blocks that pair.
 
-## Remaining error
+## Remaining error before the veto
 
-One false exact is left at 0.85. The subject edit “goat urine” against “cow urine” (IIT Madras, Kamakoti) stays exact: the word cosine of goat and cow is 0.72, above 0.65, and no amount, date, or community rule fires.
+One false exact was left at 0.85 with `KEYTERM_SIM` 0.65. The subject edit “goat urine” against “cow urine” (IIT Madras, Kamakoti) stayed exact: the word cosine of goat and cow is 0.72, above 0.65, and no amount, date, or community rule fired.
 
-## LLM veto, once a key exists
+## LLM veto
 
-`LLM_CONTEXT_CHECK` is false. While it is false, box 6 does not call the model. When a key exists, turn the flag on and score the same 70 rows. The call runs only after every rule has left the pair exact. It can turn exact into similar. It cannot turn similar or none into exact. Count how many of the remaining false exacts it vetoes, and how many true exacts it vetoes by mistake. The reason on a veto is “A careful read found a difference: …”. Do not change `TAU_HIGH`, `TAU_LOW`, or `KEYTERM_SIM` to fit that run.
+The veto runs only after every rule has left the pair exact. It can turn exact into similar. It cannot turn similar or none into exact. The model was `gemini-3.5-flash-lite`. The response cache was on for the scoring script. If the call raises, the pair is similar and the reason is “The careful same-claim check could not run, so this is checked fresh.”
+
+At `TAU_HIGH` 0.85, with the veto on:
+
+| KEYTERM_SIM | precision | Wilson low | Wilson high | recall | false exacts | calls used |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.65 | 1.000 | 0.646 | 1.000 | 0.167 | 0 | 11 |
+| 0.45 | 1.000 | 0.832 | 1.000 | 0.452 | 0 | 22 |
+
+Goat against cow is similar under both floors. The 0.65 run vetoed four exacts, three of them labelled y:
+
+- Pair 39. Differing detail: attribution of introduction by the BJP government. “Bio-toilets in Indian railways were first introduced only after 2014 by the BJP government.” against “Bio-toilets in Indian Railways were introduced only after 2014.”
+- Pair 40. Differing detail: the specific speed and conditions for treating fever and digestive issues. “IIT Madras Director V. Kamakoti stated that cow urine has medicinal properties and can treat fever and indigestion.” against “IIT Madras Director V. Kamakoti claims cow urine has medicinal properties including the ability to cure fever in 15 minutes and help with digestive issues like IBS.”
+- Pair 41. Differing detail: survey versus contest. “Amul is organizing a survey to celebrate its 75th anniversary where users can win cash prizes.” against “Amul is giving out cash prizes through a contest to celebrate its 75th anniversary.”
+
+The adopted floor is 0.45 because that row has the same precision and a higher recall. The same 70 pairs were used to choose KEYTERM_SIM and to measure it, so these numbers are optimistic; the end-to-end eval on 2025-26 claims is the clean test.
