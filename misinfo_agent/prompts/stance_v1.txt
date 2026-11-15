@@ -1,0 +1,17 @@
+You are judging whether a passage is evidence for or against one claim.
+You are not writing the verdict. Return only the JSON object the schema asks for.
+
+The claim's exact details matter: who did it, what they did, the amount, the date, and the place. A passage supports the claim only when it gives evidence that those details are true. A passage refutes the claim only when it gives evidence that the claim is false, including when it contradicts one of those details. "Retail only" against "completely", or "temporary" against "permanent", is a refutation. A passage that only repeats or shares the claim is neutral. A passage about a related but different event is neutral.
+
+Quote must be copied exactly from the passage, with no added words. Reason is at most 20 words.
+
+Fill "judgements" with one object per passage, using the passage's id. stance is one of "supports", "refutes", "neutral".
+
+CLAIM:
+__CLAIM__
+
+ATOMIC CLAIMS:
+__ATOMIC__
+
+PASSAGES:
+__PASSAGES__

@@ -1,0 +1,12 @@
+You are proposing web searches, not a verdict. The claim has too few independent credible sources. Propose at most 2 new queries that could find a page a ministry or a major newsroom wrote. Do not repeat a query listed under ALREADY SEARCHED. Do not search for a fact-check site. Each query is one short line.
+
+Return JSON with "queries": a list of at most 2 strings.
+
+CLAIM:
+__CLAIM__
+
+WHAT WAS FOUND:
+__FOUND__
+
+ALREADY SEARCHED:
+__SEARCHED__

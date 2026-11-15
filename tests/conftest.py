@@ -1,9 +1,9 @@
 """Keep the default test run off the network.
 
-A key in .env must not turn `pytest` into a Gemini session. Unless a test
-is marked live, the key is removed, llm.py is not allowed to read .env
-back, and building the real client raises. Live tests run only with
-`pytest -m live`.
+A key in .env must not turn `pytest` into a Gemini or Tavily session.
+Unless a test is marked live, both keys are removed, neither gateway is
+allowed to read .env back, and building either real client raises.
+Live tests run only with `pytest -m live`.
 """
 
 import pytest
@@ -35,4 +35,42 @@ def _offline_llm(request, monkeypatch, tmp_path):
     from misinfo_agent.llm import _RECENT_REAL_CALLS
 
     _RECENT_REAL_CALLS.clear()
+
+    # Same wall around Tavily. search.py would otherwise load TAVILY_API_KEY
+    # from .env on the first search() and spend the monthly budget.
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr("misinfo_agent.search._load_env", lambda: None)
+
+    def _refuse_tavily(*args, **kwargs):
+        raise RuntimeError("offline test tried to create a Tavily client")
+
+    monkeypatch.setattr("misinfo_agent.search._client", _refuse_tavily)
+    monkeypatch.setattr("misinfo_agent.config.SEARCH_CACHE", False)
+    monkeypatch.setattr("misinfo_agent.config.SEARCH_CACHE_DIR", tmp_path / "search")
+    # The monthly counter is a real file. Offline tests must not add to it
+    # or trip the cap the live run is using.
+    monkeypatch.setattr(
+        "misinfo_agent.search.MONTHLY_COUNT_PATH",
+        tmp_path / "search_monthly_count.json",
+    )
+    from misinfo_agent.search import (
+        clear_fake_search,
+        reset_claim_searches,
+        reset_search_usage,
+    )
+
+    clear_fake_search()
+    reset_claim_searches()
+    reset_search_usage()
+    # Page fetches write under data/ and open sockets. Offline tests get
+    # a temp cache and a client that refuses, the same wall as Tavily.
+    monkeypatch.setattr("misinfo_agent.config.PAGE_CACHE_DIR", tmp_path / "pages")
+
+    def _refuse_fetch(*args, **kwargs):
+        raise RuntimeError("offline test tried to fetch a page")
+
+    monkeypatch.setattr("misinfo_agent.fetch._http_get", _refuse_fetch)
     yield
+    clear_fake_search()
+    reset_claim_searches()
+    reset_search_usage()

@@ -13,9 +13,10 @@ from misinfo_agent.state import ClaimState
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_state.json"
 
-# Every box module, plus the two shared modules they all import. llm.py is
-# included because it is the only legal place for a model call; a missing
-# module would let a later box import a provider SDK directly.
+# Every box module, plus the shared modules they all import. llm.py is the
+# only legal place for a model call, search.py the only legal place for a
+# web search. A missing module would let a later box import a provider SDK
+# directly.
 MODULES = [
     "misinfo_agent.config",
     "misinfo_agent.state",
@@ -32,6 +33,8 @@ MODULES = [
     "misinfo_agent.output",
     "misinfo_agent.audit",
     "misinfo_agent.llm",
+    "misinfo_agent.search",
+    "misinfo_agent.fetch",
     "misinfo_agent.graph",
 ]
 

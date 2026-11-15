@@ -28,6 +28,7 @@ import sys
 import json
 import pickle
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -370,6 +371,37 @@ def _topk_indices(scores: np.ndarray, k: int) -> np.ndarray:
     return chosen[order].astype(np.int64, copy=False)
 
 
+_ENCODER = None
+_ENCODER_LOCK = threading.Lock()
+
+
+def get_encoder():
+    """The one BGE-M3 in this process.
+
+    Box 5 and box 7 both embed text. A second copy would use the memory
+    twice and could disagree if one of them left the sequence length at
+    the library default of 8192. The lock covers the first load only.
+    """
+    global _ENCODER
+    if _ENCODER is not None:
+        return _ENCODER
+    with _ENCODER_LOCK:
+        if _ENCODER is None:
+            _ENCODER = _build_encoder()
+        return _ENCODER
+
+
+def _build_encoder():
+    from sentence_transformers import SentenceTransformer
+
+    device = _device()
+    encoder = SentenceTransformer(MODEL_NAME, device=device)
+    # E was built at 256 tokens. The library default would embed a longer
+    # prefix, and the dot product would stop being the cosine box 6 uses.
+    encoder.max_seq_length = MAX_SEQ_LEN
+    return encoder
+
+
 def _device() -> str:
     """Same preference as the script that built E: MPS, then CUDA, then CPU.
 
@@ -417,18 +449,13 @@ class ClaimMemory:
         return cls(matrix, meta, bm25)
 
     def _encoder_model(self):
-        if self._encoder is None:
-            from sentence_transformers import SentenceTransformer
-
-            device = _device()
-            encoder = SentenceTransformer(MODEL_NAME, device=device)
-            # bge-m3's library default is 8192 tokens. E was built at 256.
-            # Leaving the default would embed a different prefix than the
-            # index, and E @ q would not be the cosine the thresholds use.
-            encoder.max_seq_length = MAX_SEQ_LEN
-            self._encoder = encoder
-            self.device = device
-        return self._encoder
+        # The shared loader, not a second SentenceTransformer. Box 7 scores
+        # passages with the same object, so a claim and a memory row are
+        # embedded by one model.
+        encoder = get_encoder()
+        self._encoder = encoder
+        self.device = _device()
+        return encoder
 
     def embed(self, claim: str) -> np.ndarray:
         """One unit-length query vector. Whitespace is collapsed first.

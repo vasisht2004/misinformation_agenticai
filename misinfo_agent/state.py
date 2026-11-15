@@ -51,6 +51,11 @@ class ClaimState(TypedDict, total=False):
     domain: str
     # Box 3–4. Warning signs from the claim as circulated (prompt_v4a list).
     red_flags: list
+    # Box 1–2, or the eval. YYYY-MM-DD the claim was circulating. Ingest
+    # sets it from the message; the eval sets it to the fact-check article
+    # date. Box 7 compares a page's date with this so a later write-up
+    # cannot count as something the system could have read at the time.
+    claim_date: str
 
     # Box 5. Hybrid-search hits. Empty means the memory was searched and nothing
     # survived the filters, which is different from the key being absent.
@@ -79,6 +84,13 @@ class ClaimState(TypedDict, total=False):
 
     # Box 7. Evidence rows E1…En. The reducer appends across search rounds.
     evidence: Annotated[list, operator.add]
+    # Box 7. Windows picked from the fetched pages, before stance. Stance
+    # is what writes evidence. These rows are the input to that step.
+    passages: list
+    # Box 7. Counts for this round: searches, the stance call, how the
+    # passages split, independent groups on each side, circulation
+    # sightings, seconds, and a note when a cap stopped the round short.
+    investigate_stats: dict
     # Box 9. How many investigate rounds have run. The gate stops at 2.
     rounds: int
     # Box 9. "sufficient", "insufficient", "conflicting" or "search_more".
