@@ -30,6 +30,7 @@
   },
   "domain": "Finance & scams",
   "red_flags": ["Fake or vague authority", "Call to forward", "Urgency"],
+  "claim_date": "2016-11-15",
   "matches": [
     {
       "article_id": "fc-rbi-500-2016",
@@ -70,6 +71,21 @@
     "The closest past fact-check is about ₹500 notes and a December deadline, so the wording is close, but it is not the same notice.",
     "The forward uses a status word ('invalid') and the match is from 2016, which is more than a year old, so the old verdict cannot be reused."
   ],
+  "passages": [],
+  "investigate_stats": {
+    "searches": 5,
+    "llm_calls": 1,
+    "n_passages": 4,
+    "n_supports": 0,
+    "n_refutes": 3,
+    "n_neutral": 1,
+    "groups_supporting": 0,
+    "groups_refuting": 3,
+    "circulation_sightings": 1,
+    "seconds": 18.4,
+    "notes": [],
+    "quote_unverified": 0
+  },
   "evidence": [
     {
       "id": "E1",
