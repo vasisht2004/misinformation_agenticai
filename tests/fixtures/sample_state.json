@@ -1,26 +1,66 @@
 {
   "raw_input": "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December. Forward to all groups",
+  "raw_text": "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December. Forward to all groups",
   "input_type": "text",
-  "text": "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December. Forward to all groups",
-  "match_text": "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December.",
+  "text": "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December.",
+  "match_text": "rbi has announced that all ₹500 notes printed before 2016 will be invalid from 1 december",
+  "headline": "",
+  "body": "",
+  "article_date": "",
   "source": "whatsapp",
   "image": null,
+  "image_path": "",
+  "image_sha256": "",
+  "image_phash": "",
+  "ocr_text": "",
+  "ocr_mean_conf": null,
+  "caption": "",
   "lang": "en",
+  "language": "en",
+  "hinglish": false,
   "flags": ["call_to_forward"],
+  "style_signals": {
+    "urgency_words": [],
+    "share_request": true,
+    "forwarded_label": null,
+    "caps_ratio": 0.0602,
+    "exclaim_count": 0,
+    "emoji_count": 0,
+    "authority_mentions": ["RBI"],
+    "conspiracy_phrases": [],
+    "certainty_words": []
+  },
   "quality": {
     "ok": true,
-    "chars": 118,
+    "chars": 90,
     "reason": "Plain text forward. No OCR and no URL to fetch."
   },
+  "checkable_hint": true,
+  "checkable_reason": "",
   "dedupe": {
     "is_duplicate": false,
     "seen_count": 0,
     "method": "minhash"
   },
+  "submission_hash": "c9c4b414c2739182479b83b46a5fff47007d8393071d10ecf8b421aee70d6d98",
+  "submission_count": 1,
   "claim": "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December.",
   "atomic_claims": [
-    "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December."
+    {
+      "id": "A1",
+      "text": "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December.",
+      "core": true,
+      "checkable": true
+    }
   ],
+  "checkable": true,
+  "not_checkable_reason": "",
+  "extract_notes": [],
+  "headline_body_mismatch": "",
+  "visual_description": "",
+  "location_clues": "",
+  "time_clues": "",
+  "style_flags": [],
   "entities": {
     "amounts": ["₹500"],
     "years": ["2016"],

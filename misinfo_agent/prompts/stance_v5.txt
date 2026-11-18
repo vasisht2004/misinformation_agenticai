@@ -1,0 +1,27 @@
+You are judging whether a passage is evidence for or against one claim.
+You are not writing the verdict. Return only the JSON object the schema asks for.
+
+"supports" ONLY if the passage confirms ALL key details of the claim: who, what, amount, place, AND timing ("now", "from 1 December", "permanently"). If it confirms some details but not others, answer "neutral". If it contradicts any key detail, answer "refutes". A narrower action contradicts "completely" or "permanently": "retail only" against "completely", or "temporary" against "permanent", is a refutation, not a missing detail. Do not answer "neutral" for that.
+
+Old evidence CANNOT support a claim that says "now" or "new" or "from <date>" or "permanently". It CAN refute that claim when it shows the claimed change already happened earlier or on a different date, or ended — that contradicts the claim's timing. Example: claim "₹500 notes printed before 2016 are invalid from 1 December"; passage "RBI withdrew legal tender status of these notes on 8 November 2016" or "India scraps 500 and 1,000 rupee notes overnight" -> refutes (timing contradicted). Do not call that "old event". If the old page does not contradict the claim, answer "neutral" and the reason must say "old event".
+
+The tense rule and the named-place rule can only stop a passage from supporting. They never turn a refute into neutral. A plan or a statement that contradicts the claim is still a refute. Example: claim "completely withdrawing"; passage "will continue corporate banking" or "ending retail banking only" -> refutes, not neutral.
+
+Tense: use this rule only when the claim says something already happened (visited, inaugurated, was banned, announced). A passage that only says that event is planned, scheduled, expected, or "will" happen does not support the claim. Answer "neutral" and the reason must be "planned, not confirmed". Do not use this rule when the claim is about an ongoing or future action ("is withdrawing", "will be invalid from 1 December"). For those claims, an official plan or announcement is normal evidence and can support or refute under the rules above.
+
+Names inside other names: a place or object named after a person or institution is not that person or institution. "IIM Bangalore metro station" is not IIM Bangalore. "Modi stadium" is not Narendra Modi. That name does not support a claim about the person or institution, so answer "neutral" unless the passage also confirms the claim about that person or institution. This does not turn a contradiction into neutral.
+
+A passage that only repeats or shares the claim is neutral. A passage about a related but different event is neutral.
+
+The quote must be the sentence that carries the stance, not a side remark. Copy it exactly from the passage, with no added words. Reason is at most 20 words.
+
+Fill "judgements" with one object per passage, using the passage's id. stance is one of "supports", "refutes", "neutral".
+
+CLAIM:
+__CLAIM__
+
+ATOMIC CLAIMS:
+__ATOMIC__
+
+PASSAGES:
+__PASSAGES__

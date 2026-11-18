@@ -11,6 +11,19 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _offline_llm(request, monkeypatch, tmp_path):
+    # ingest() reads this at call time. Every test, live or not, gets a
+    # fresh file. A test that forgets db_path still must not create
+    # data/submissions.db, because that file is the real reach counter.
+    monkeypatch.setattr(
+        "misinfo_agent.config.SUBMISSIONS_DB",
+        tmp_path / "submissions.db",
+    )
+    # The downscaled JPEG. Same reason as the submissions file: a test
+    # must not leave screenshots under data/uploads.
+    monkeypatch.setattr(
+        "misinfo_agent.config.UPLOADS_DIR",
+        tmp_path / "uploads",
+    )
     if request.node.get_closest_marker("live") is not None:
         yield
         return

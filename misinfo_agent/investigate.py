@@ -8,10 +8,13 @@ the verdict; it only says what each passage does.
 The plan is fixed on purpose. A model that writes its own queries can
 search for the verdict it already expects. These five lines always ask
 for support, for a refutation, for the office that would have issued the
-order, and, when box 6 found a near miss, for the older wording. One
-top-up is allowed after that, and only when fewer than two independent
-tier 1–2 groups support or refute the claim. The gate's second call
-skips queries this box already ran.
+order, and, when box 6 found a near miss, for the older wording. They
+are built from the core atomic claim. Each further atomic claim is a
+different event, so it gets one neutral line of its own; a single query
+for "A and then B" returns pages about A and misses B. One top-up is
+allowed after that, and only when fewer than two independent tier 1–2
+groups support or refute the claim. The gate's second call skips queries
+this box already ran.
 
 The encoder is BGE-M3, the same model as the memory. It embeds text. It
 is not a language-model call, and it is loaded once per process.
@@ -32,7 +35,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import misinfo_agent.config as config
 from misinfo_agent.fetch import Page, date_missing, fetch_pages, remember_publication
-from misinfo_agent.llm import LLMError, call_structured, get_usage
+from misinfo_agent.llm import LLMError, LLMQuotaError, call_structured, get_usage
 from misinfo_agent.memory import get_encoder
 from misinfo_agent.search import (
     Hit,
@@ -59,9 +62,12 @@ _LEAD_WORDS = 30
 # is the subject, not a second copy of the neutral sentence.
 _SUBJECT_WORDS = 8
 
-# Five lines, and no sixth. A later kind has to take a slot, not add a
-# search the monthly budget was not planned around.
+# Five lines when the claim is one event. A later kind has to take a
+# slot, not add a search. A checkable second or third atomic claim may
+# add one neutral line. The plan then stops at six, so two of the eight
+# searches allowed for the claim are left for the top-up.
 _MAX_QUERIES = 5
+_PLAN_CAP = 6
 
 # Five snippets times five queries is 25, which is also the candidate cap.
 # Asking for more would fetch pages the cap throws away.
@@ -150,7 +156,11 @@ _TOPUP_QUERIES = 2
 # happening now. It can still refute the claim, which is why only a
 # support is cleared. A refute is never rewritten.
 _OLD_EVENT_DAYS = 365
-_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "stance_v3.txt"
+# v7 is the stance prompt. Older versions stay on disk so a cached check
+# can still be read. v7 keeps every v6 rule and adds the share date,
+# cure/effect refutes, and the campus-versus-station example. A different
+# event (another line, scheme, year, or person) is neutral.
+_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "stance_v7.txt"
 _TOPUP_PATH = Path(__file__).resolve().parent / "prompts" / "topup_v1.txt"
 _CURRENT_CLAIM = re.compile(
     r"\b(?:now|new|permanently)\b|\bfrom\s+(?:\d{1,2}\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
@@ -197,6 +207,47 @@ class StanceBatch(BaseModel):
     """
 
     judgements: list[StanceJudgement] = Field(default_factory=list)
+
+
+class AtomicStanceJudgement(BaseModel):
+    """One passage judged against one atomic claim.
+
+    A separate model, not a field on StanceJudgement. One atomic claim
+    (or none) must keep today's schema, so a cached single-claim response
+    still validates and the model is not asked for an id it did not have.
+    """
+
+    passage_id: str
+    atomic_id: str
+    stance: Literal["supports", "refutes", "neutral"]
+    quote: str = ""
+    reason: str = ""
+
+    @field_validator("quote", "reason", "passage_id", "atomic_id", mode="before")
+    @classmethod
+    def _text(cls, value):
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("reason")
+    @classmethod
+    def _short_reason(cls, value):
+        return " ".join(value.split()[:20])
+
+    @field_validator("atomic_id")
+    @classmethod
+    def _id(cls, value):
+        text = " ".join(str(value).split())
+        if not text:
+            raise ValueError("atomic_id is required when there are several claims")
+        return text
+
+
+class AtomicStanceBatch(BaseModel):
+    """Same call as StanceBatch, with one judgement per passage per claim."""
+
+    judgements: list[AtomicStanceJudgement] = Field(default_factory=list)
 
 
 class TopupBatch(BaseModel):
@@ -265,11 +316,23 @@ def investigate(state: dict) -> dict:
             try:
                 batch = judge_stance(state, chosen)
             except LLMError as exc:
+                # The day's quota is spent. Another search or a top-up would
+                # only fail the same way, so the caller stops the run here.
+                if isinstance(exc, LLMQuotaError):
+                    raise
                 notes.append(str(exc))
+                # Box 9 must treat this as "system error -> retry / human",
+                # never as "insufficient evidence". The passages stay so a
+                # person can see what was fetched. An empty table here means
+                # the stance call failed, not that no source was found.
                 stance_failed = True
             else:
                 labelled, unverified = apply_stance(
-                    _claim_text(state), chosen, batch.judgements, state.get("claim_date")
+                    _claim_text(state),
+                    chosen,
+                    batch.judgements,
+                    state.get("claim_date"),
+                    _atomic_items(state),
                 )
                 # The rows the model did not see are not part of this round.
                 # Keeping them would make the counts disagree with the call.
@@ -311,6 +374,8 @@ def investigate(state: dict) -> dict:
         queries=_merge_queries(prior_queries, ran),
         topup_used=topup_used,
         topup_queries=topup_queries,
+        stance_failed=stance_failed,
+        prior_evidence=prior_evidence,
     )
     return {
         "passages": [passage.model_dump(mode="json") for passage in passages],
@@ -319,36 +384,116 @@ def investigate(state: dict) -> dict:
     }
 
 
-def judge_stance(state: dict, passages: list[Passage]) -> StanceBatch:
-    """One call for the whole claim. The prompt file holds the rules."""
+def _atomic_items(state: dict) -> list[dict]:
+    """Extract's atomic claims as {id, text, core}, or an empty list.
+
+    A string is the older shape (the whole claim repeated for the stance
+    prompt). A dict is what extract writes. Empty text is skipped. When
+    nothing is marked core, the first item is the core: a single claim
+    has no other event to search.
+    """
     atomic = state.get("atomic_claims")
-    if isinstance(atomic, list) and atomic:
-        atomic_text = "\n".join(str(item) for item in atomic if str(item).strip())
-    else:
-        atomic_text = "(none)"
+    if not isinstance(atomic, list):
+        return []
+    items = []
+    for item in atomic:
+        if isinstance(item, dict):
+            text = " ".join(str(item.get("text") or "").split())
+            if not text:
+                continue
+            ident = " ".join(str(item.get("id") or "").split()) or f"A{len(items) + 1}"
+            # Missing means checkable. Older callers and a one-line string
+            # did not have the flag, and they were searched.
+            items.append({
+                "id": ident,
+                "text": text,
+                "core": bool(item.get("core")),
+                "checkable": item.get("checkable") is not False,
+            })
+        else:
+            text = " ".join(str(item).split())
+            if not text:
+                continue
+            items.append({
+                "id": f"A{len(items) + 1}",
+                "text": text,
+                "core": not items,
+                "checkable": True,
+            })
+    if items and not any(item["core"] for item in items):
+        items[0] = {**items[0], "core": True}
+    return items
+
+
+def _atomic_text(state: dict) -> str:
+    """The atomic claims as lines the stance prompt can read.
+
+    Stringifying a dict would put the braces into the prompt. The core
+    mark tells the model which sentence the fixed plan was built from.
+    """
+    items = _atomic_items(state)
+    if not items:
+        return "(none)"
+    lines = []
+    for item in items:
+        mark = "core" if item["core"] else "also"
+        lines.append(f"{item['id']} ({mark}) {item['text']}")
+    return "\n".join(lines)
+
+
+def judge_stance(state: dict, passages: list[Passage]) -> StanceBatch | AtomicStanceBatch:
+    """One call for the whole claim. The prompt file holds the rules.
+
+    Two or three atomic claims are judged in that same call, one label
+    per passage per claim. One claim, or none, keeps the original schema
+    so the JSON shape does not change.
+    """
+    items = _atomic_items(state)
+    multi = len(items) >= 2
     blocks = []
     for passage in passages:
         when = passage.published_date or "unknown"
         blocks.append(f"{passage.passage_id}\ndate: {when}\n{passage.text}")
+    shared = state.get("claim_date")
+    if not isinstance(shared, str) or not shared.strip():
+        shared = "an unknown date"
     prompt = (
         _PROMPT_PATH.read_text(encoding="utf-8")
+        .replace("__CLAIM_DATE__", shared.strip())
         .replace("__CLAIM__", _claim_text(state) or "(none)")
-        .replace("__ATOMIC__", atomic_text or "(none)")
+        .replace("__ATOMIC__", _atomic_text(state) or "(none)")
         .replace("__PASSAGES__", "\n\n".join(blocks))
     )
+    schema = StanceBatch
+    if multi:
+        # The file already holds every v6 rule. This paragraph only tells
+        # the model to apply that same text once per atomic claim. A
+        # one-claim call does not get it, so its schema stays the old one.
+        ids = ", ".join(item["id"] for item in items)
+        prompt += (
+            "\n\nThere is more than one atomic claim. Return one judgement "
+            "for every passage and every atomic claim "
+            f"({ids}), and set atomic_id to that claim's id. Apply every "
+            "rule above to that atomic claim alone, including the share "
+            "date, the cure rule, and the named-place rule. A passage may "
+            "support one and be neutral about another. Do not require it "
+            "to confirm the other atomic claims.\n"
+        )
+        schema = AtomicStanceBatch
     return call_structured(
         prompt,
-        StanceBatch,
+        schema,
         purpose="stance",
-        prompt_version="stance_v3",
+        prompt_version="stance_v7",
     )
 
 
 def apply_stance(
     claim: str,
     passages: list[Passage],
-    judgements: list[StanceJudgement],
+    judgements: list,
     claim_date: str | None = None,
+    atomic_items: list[dict] | None = None,
 ) -> tuple[list[dict], int]:
     """Keep a label only when its quote is really in the passage.
 
@@ -356,51 +501,91 @@ def apply_stance(
     flattened, did not come from the page. The label becomes neutral and
     the row is flagged. A passage that only repeats the claim is neutral
     even if the model calls it support: the rumour is not evidence for itself.
+
+    One atomic claim, or none, is one label per passage and the row's
+    atomic_id is A1, which is the shape this box had before a claim could
+    split. Two or three claims are judged separately, and the v6 rules
+    (the quote, a passage that only repeats the claim, an old page) use
+    that claim's own sentence.
     """
-    by_id = {item.passage_id: item for item in judgements}
-    labelled = []
+    items = list(atomic_items or [])
+    labelled: list[dict] = []
     unverified = 0
+    if len(items) < 2:
+        by_id = {item.passage_id: item for item in judgements}
+        for passage in passages:
+            row, flag = _judge_passage(claim, passage, by_id.get(passage.passage_id), claim_date)
+            row["atomic_id"] = "A1"
+            unverified += int(flag)
+            labelled.append(row)
+        return labelled, unverified
+    by_key = {}
+    for item in judgements:
+        aid = " ".join(str(getattr(item, "atomic_id", "") or "").split())
+        by_key[(item.passage_id, aid)] = item
     for passage in passages:
-        judgement = by_id.get(passage.passage_id)
-        stance = judgement.stance if judgement is not None else "neutral"
-        quote = judgement.quote if judgement is not None else ""
-        reason = judgement.reason if judgement is not None else "No judgement was returned."
-        flag = False
-        if quote and not _quote_in_passage(quote, passage.text):
-            stance = "neutral"
-            flag = True
-        elif stance in {"supports", "refutes"} and not _quote_in_passage(quote, passage.text):
-            # An empty quote is not a quote. Support without words is not evidence.
-            stance = "neutral"
-            flag = True
-        if _only_repeats(claim, passage.text):
-            stance = "neutral"
-            reason = reason or "The passage only repeats the claim."
-        # Only a support is cleared. An old page that names a different
-        # date is a refutation of "from 1 December", and this line must
-        # not turn that refutes into neutral.
-        if stance == "supports" and _old_event(claim, claim_date, passage):
-            stance = "neutral"
-            reason = "old event"
-        if flag:
-            unverified += 1
-        labelled.append(
-            {
-                "passage": passage,
-                "stance": stance,
-                "quote": quote,
-                "reason": reason,
-                "quote_unverified": flag,
-            }
-        )
+        for atomic in items:
+            row, flag = _judge_passage(
+                atomic["text"],
+                passage,
+                by_key.get((passage.passage_id, atomic["id"])),
+                claim_date,
+            )
+            row["atomic_id"] = atomic["id"]
+            unverified += int(flag)
+            labelled.append(row)
     return labelled, unverified
 
 
+def _judge_passage(claim: str, passage: Passage, judgement, claim_date) -> tuple[dict, bool]:
+    """One passage against one sentence. The caller sets atomic_id."""
+    stance = judgement.stance if judgement is not None else "neutral"
+    quote = judgement.quote if judgement is not None else ""
+    reason = judgement.reason if judgement is not None else "No judgement was returned."
+    flag = False
+    if quote and not _quote_in_passage(quote, passage.text):
+        stance = "neutral"
+        flag = True
+    elif stance in {"supports", "refutes"} and not _quote_in_passage(quote, passage.text):
+        # An empty quote is not a quote. Support without words is not evidence.
+        stance = "neutral"
+        flag = True
+    if _only_repeats(claim, passage.text):
+        stance = "neutral"
+        reason = reason or "The passage only repeats the claim."
+    # Only a support is cleared. An old page that names a different
+    # date is a refutation of "from 1 December", and this line must
+    # not turn that refutes into neutral.
+    if stance == "supports" and _old_event(claim, claim_date, passage):
+        stance = "neutral"
+        reason = "old event"
+    return (
+        {
+            "passage": passage,
+            "stance": stance,
+            "quote": quote,
+            "reason": reason,
+            "quote_unverified": flag,
+        },
+        flag,
+    )
+
+
 def _quote_in_passage(quote: str, passage: str) -> bool:
-    needle = _flat_quotes(quote)
+    """True when the quote's words appear in the passage.
+
+    Straight, curly, single, and double quotes are the same mark. The
+    model copies the words and swaps the marks. That is still the
+    sentence on the page, so the row is not thrown away.
+    """
+    needle = _loose_quotes(_flat_quotes(quote))
     if not needle:
         return False
-    return needle in _flat_quotes(passage)
+    return needle in _loose_quotes(_flat_quotes(passage))
+
+
+def _loose_quotes(text: str) -> str:
+    return " ".join(text.replace('"', " ").replace("'", " ").split())
 
 
 def _flat_quotes(text: str) -> str:
@@ -579,9 +764,10 @@ def build_evidence(
 
     Neutral passages stay in the counts. They are not rows: a row is
     something the gate can cite. Inside one group, a second row with the
-    same quote is the same sentence and is dropped. Ids continue after
-    the rows a previous round already returned, so a second call appends
-    E5 rather than another E1.
+    same quote is the same sentence and is dropped. A group that contains
+    both a support and a refute is kept in full and marked group_conflict.
+    Ids continue after the rows a previous round already returned, so a
+    second call appends E5 rather than another E1.
     """
     if not labelled:
         return []
@@ -600,6 +786,11 @@ def build_evidence(
         if row["stance"] not in {"supports", "refutes"}:
             continue
         passage = row["passage"]
+        # The page the person submitted cannot be evidence for itself.
+        # A search hit of that same URL is dropped earlier; this is the
+        # backstop for a row that arrived another way.
+        if _is_submitted_page(state, passage.url):
+            continue
         rows.append(
             {
                 "url": passage.url,
@@ -609,6 +800,9 @@ def build_evidence(
                 "group_id": groups.get(passage.passage_id, ""),
                 "stance": row["stance"],
                 "quote": row["quote"],
+                # Shown to a person. The quote field stays the model's words
+                # so a later check can still find them in the passage.
+                "display_quote": _display_quote(row["quote"], passage.text),
                 "reason": row["reason"],
                 "passage": passage.text,
                 "score": passage.score,
@@ -621,13 +815,44 @@ def build_evidence(
                 # The tier does not change when this is true. The gate can
                 # still see that the row is a snippet.
                 "snippet_only": not passage.fetched,
+                # A1 when the claim was not split. Two events keep their
+                # own id so a support of one is not a support of the other.
+                "atomic_id": str(row.get("atomic_id") or "A1"),
             }
         )
     rows.sort(key=lambda item: (item["tier"], -item["score"], item["url"]))
     rows = _drop_repeated_quotes(rows, prior or [])
+    # After the duplicate quote is gone. A repeated sentence is not a
+    # second stance, and it must not invent a conflict by itself.
+    _mark_group_conflicts(rows, prior or [])
     for offset, row in enumerate(rows):
         row["id"] = f"E{id_start + offset}"
     return rows
+
+
+def _display_quote(quote: str, passage: str) -> str:
+    """The quote, plus the sentence before it when the quote is a fragment.
+
+    "This is a myth." is a real stance and a useless line on its own. The
+    previous sentence says what the myth is. Eight words or more already
+    carry that, so those quotes are shown as the model wrote them. This
+    does not change the label or the prompt.
+    """
+    text = " ".join(str(quote or "").split())
+    if len(text.split()) >= 8:
+        return text
+    needle = _flat_quotes(text)
+    if not needle:
+        return text
+    sentences = _sentences(passage or "")
+    for index, sentence in enumerate(sentences):
+        if needle not in _flat_quotes(sentence):
+            continue
+        if index == 0:
+            return text
+        previous = " ".join(sentences[index - 1].split())
+        return f"{previous} {text}"
+    return text
 
 
 def _age_days(claim_date, published) -> int | None:
@@ -658,6 +883,8 @@ def _stats(
     queries,
     topup_used,
     topup_queries,
+    stance_failed=False,
+    prior_evidence=None,
 ) -> dict:
     supports = sum(1 for row in labelled if row["stance"] == "supports")
     refutes = sum(1 for row in labelled if row["stance"] == "refutes")
@@ -690,6 +917,18 @@ def _stats(
         "queries": queries,
         "topup_used": topup_used,
         "topup_queries": topup_queries,
+        # True only when the stance call itself failed. Box 9 must read this
+        # as "system error -> retry / human", never as "insufficient evidence".
+        "stance_failed": bool(stance_failed),
+        # Groups that argue both sides. Box 9 (the gate) must count each of
+        # these on neither side and flag the claim. The rows stay in evidence.
+        "group_conflicts": _conflicting_groups(evidence, prior_evidence or []),
+        # The same totals, split by atomic claim. A passage can support A1
+        # and say nothing about A2; the top-level counts would hide that.
+        "by_atomic": _by_atomic(labelled, evidence),
+        # Neutral rows are not evidence. They are kept here so a run with
+        # an empty table can still show why each passage was not a hit.
+        "stance_rows": _stance_rows(labelled),
     }
 
 
@@ -744,6 +983,57 @@ def _next_evidence_id(prior: list) -> int:
     return highest + 1
 
 
+def _by_atomic(labelled: list[dict], evidence: list[dict]) -> dict:
+    """Supports, refutes, and independent groups for each atomic claim.
+
+    A missing id is A1. That is the single-claim path, and it keeps the
+    per-claim block equal to the top-level counts.
+    """
+    order: list[str] = []
+
+    def _add(row: dict) -> None:
+        aid = str(row.get("atomic_id") or "A1")
+        if aid not in order:
+            order.append(aid)
+
+    for row in labelled:
+        _add(row)
+    for row in evidence:
+        _add(row)
+    if not order:
+        order = ["A1"]
+    blocks = {}
+    for aid in order:
+        lab = [row for row in labelled if str(row.get("atomic_id") or "A1") == aid]
+        ev = [row for row in evidence if str(row.get("atomic_id") or "A1") == aid]
+        blocks[aid] = {
+            "n_supports": sum(1 for row in lab if row["stance"] == "supports"),
+            "n_refutes": sum(1 for row in lab if row["stance"] == "refutes"),
+            "n_neutral": sum(1 for row in lab if row["stance"] == "neutral"),
+            "groups_supporting": len({row["group_id"] for row in ev if row["stance"] == "supports"}),
+            "groups_refuting": len({row["group_id"] for row in ev if row["stance"] == "refutes"}),
+        }
+    return blocks
+
+
+def _stance_rows(labelled: list[dict]) -> list[dict]:
+    """One line per judgement, including neutrals, for the demo and the audit."""
+    rows = []
+    for row in labelled:
+        passage = row.get("passage")
+        if passage is None:
+            continue
+        rows.append({
+            "passage_id": passage.passage_id,
+            "url": passage.url,
+            "netloc": passage.netloc,
+            "atomic_id": str(row.get("atomic_id") or "A1"),
+            "stance": row.get("stance") or "",
+            "reason": row.get("reason") or "",
+        })
+    return rows
+
+
 def _strong_groups(evidence: list[dict]) -> int:
     """Independent groups that support or refute and are tier 1 or 2."""
     return len(
@@ -766,6 +1056,8 @@ def _topup(state, labelled, passages, already):
     try:
         proposed = propose_topup(state, labelled, already)
     except LLMError as exc:
+        if isinstance(exc, LLMQuotaError):
+            raise
         return True, [], [], [], [], 0, str(exc)
     fresh = []
     seen = {_norm_query(item) for item in already}
@@ -792,9 +1084,15 @@ def _topup(state, labelled, passages, already):
     try:
         batch = judge_stance(state, chosen)
     except LLMError as exc:
+        if isinstance(exc, LLMQuotaError):
+            raise
         return True, [], chosen, bundle["pages"], ran, 0, str(exc)
     extra_labelled, unverified = apply_stance(
-        _claim_text(state), chosen, batch.judgements, state.get("claim_date")
+        _claim_text(state),
+        chosen,
+        batch.judgements,
+        state.get("claim_date"),
+        _atomic_items(state),
     )
     return True, extra_labelled, chosen, bundle["pages"], ran, unverified, note
 
@@ -866,16 +1164,67 @@ def _groups_with_prior(passages: list[Passage], prior: list) -> dict[str, str]:
     }
 
 
+def _conflict_pairs(*tables: list) -> set[tuple[str, str]]:
+    """(group, atomic_id) pairs that argue both sides of the same claim.
+
+    A newsroom can support the inauguration and refute the campus visit.
+    That is two claims, not one conflict. A conflict is both stances on
+    one atomic claim. Rows with no id are A1, so an older round still
+    matches a new one.
+    """
+    stances: dict[tuple[str, str], set[str]] = {}
+    for table in tables:
+        for row in table:
+            if not isinstance(row, dict):
+                continue
+            group = str(row.get("group_id") or "")
+            stance = row.get("stance")
+            if not group or stance not in {"supports", "refutes"}:
+                continue
+            aid = str(row.get("atomic_id") or "A1")
+            stances.setdefault((group, aid), set()).add(stance)
+    return {
+        key for key, sides in stances.items() if "supports" in sides and "refutes" in sides
+    }
+
+
+def _conflicting_groups(*tables: list) -> list[str]:
+    """Group ids that contain both a support and a refute of one claim.
+
+    One outlet cannot be an independent vote for the claim and against it.
+    Box 9 (the gate) must count such a group on neither side and flag it.
+    """
+    return sorted({group for group, _aid in _conflict_pairs(*tables)})
+
+
+def _mark_group_conflicts(rows: list[dict], prior: list) -> None:
+    """Set group_conflict on every current row whose group argues both sides.
+
+    The rows are not deleted. Dropping the support or the refute would hide
+    the disagreement, and the gate needs both sentences. A group that only
+    supports, or only refutes, is not a conflict. A previous round counts:
+    a new refute of a group that already supports is the same disagreement.
+    """
+    conflicts = _conflict_pairs(rows, prior)
+    for row in rows:
+        row["group_conflict"] = (
+            str(row.get("group_id") or ""),
+            str(row.get("atomic_id") or "A1"),
+        ) in conflicts
+
+
 def _drop_repeated_quotes(rows: list[dict], prior: list) -> list[dict]:
     """One sentence, one row, inside a group. The earlier row is the better tier."""
     seen = set()
     for row in prior:
         if not isinstance(row, dict):
             continue
-        seen.add((str(row.get("group_id") or ""), _flat_quotes(str(row.get("quote") or "")).casefold()))
+        seen.add(_quote_key(row))
     kept = []
     for row in rows:
-        key = (row["group_id"], _flat_quotes(row["quote"]).casefold())
+        # The same sentence can be evidence for A1 and not for A2. The
+        # atomic id keeps the second row.
+        key = _quote_key(row)
         if key in seen:
             continue
         seen.add(key)
@@ -883,8 +1232,16 @@ def _drop_repeated_quotes(rows: list[dict], prior: list) -> list[dict]:
     return kept
 
 
+def _quote_key(row: dict) -> tuple[str, str, str]:
+    return (
+        str(row.get("group_id") or ""),
+        str(row.get("atomic_id") or "A1"),
+        _flat_quotes(str(row.get("quote") or "")).casefold(),
+    )
+
+
 def build_queries(state: dict) -> list[Query]:
-    """The plan for one claim. Deterministic. No model call. At most five.
+    """The plan for one claim. Deterministic. No model call.
 
     neutral asks for the claim in its own words, which is how a straight
     report headlines it. verify asks whether the named things are true,
@@ -893,13 +1250,36 @@ def build_queries(state: dict) -> list[Query]:
     asks the office that would have issued the order. lead, only after a
     similar prior, asks for the older incident in the wording people used
     then, which is the history the new wording has to be compared with.
+
+    Those lines use the core atomic claim when extract split the
+    submission. Each other atomic claim adds one neutral line, because
+    that event is not in the core sentence. With no atomic claims, or
+    only one, the plan is the same five lines as before.
     """
-    claim = _claim_text(state)
+    items = _atomic_items(state)
+    extras: list[dict] = []
+    if items:
+        cores = [item for item in items if item["core"]]
+        core = cores[0] if cores else items[0]
+        claim = core["text"]
+        if len(items) >= 2:
+            # A motive ("the government is hiding it") is not an event.
+            # Searching it spends a slot the top-up needs for the cure.
+            extras = [
+                item for item in items
+                if item["id"] != core["id"] and item.get("checkable", True)
+            ]
+    else:
+        claim = _claim_text(state)
     trimmed = _trim_words(claim, _NEUTRAL_WORDS)
     queries: list[Query] = []
     if trimmed:
         queries.append(Query(text=trimmed, kind="neutral"))
-        verify = _verify_text(claim, state.get("entities"))
+        # Names from the rest of a long article blow the query into a
+        # list. Only entities that are actually in the core sentence,
+        # and at most five of them, belong on the verify and official lines.
+        scoped = _entities_in_claim(state.get("entities"), claim, limit=5)
+        verify = _verify_text(claim, scoped)
         if verify:
             queries.append(Query(text=verify, kind="verify"))
         queries.append(
@@ -910,15 +1290,28 @@ def build_queries(state: dict) -> list[Query]:
             # Keywords, not the sentence. A circular is filed under the
             # names and the figures, and "true or false" is not how a
             # ministry page is written.
-            keywords = _official_text(claim, state.get("entities"))
+            keywords = _official_text(claim, scoped)
             if keywords:
                 queries.append(
                     Query(text=keywords, kind="official", include_domains=official)
                 )
+    seen = {_norm_query(query.text) for query in queries}
+    for item in extras:
+        # The core sentence was already searched. A second copy of it
+        # would spend a slot and return the same pages.
+        text = _trim_words(item["text"], _NEUTRAL_WORDS)
+        key = _norm_query(text)
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        queries.append(Query(text=text, kind="neutral"))
     lead = _lead_text(state)
     if lead:
         queries.append(Query(text=lead, kind="lead"))
-    return queries[:_MAX_QUERIES]
+    # No split: five lines, as before. A split stops at six so the
+    # top-up still has two searches inside the per-claim cap of eight.
+    cap = _PLAN_CAP if extras else _MAX_QUERIES
+    return queries[:cap]
 
 
 def gather_candidates(
@@ -966,10 +1359,14 @@ def gather_candidates(
         skip = {_norm_query(item) for item in (skip_queries or [])}
         queries = [query for query in queries if _norm_query(query.text) not in skip]
     batches = _run_queries(queries, end_date, ran)
+    submitted = _submitted_page(state)
     for query, hits in batches:
         for hit in hits:
             key = canonical_url(hit.url)
             if not key:
+                continue
+            # The article the person pasted is not a source for itself.
+            if submitted and _same_page(key, submitted):
                 continue
             slot = found.get(key)
             if slot is None:
@@ -1104,6 +1501,75 @@ def canonical_url(url: str) -> str:
 def _is_tracking(key: str) -> bool:
     name = key.casefold()
     return name.startswith("utm_") or name in _TRACKING
+
+
+def _submitted_page(state: dict) -> str:
+    """The canonical URL of a page the person submitted. Empty otherwise.
+
+    A text forward and an image have no page to exclude. raw_text on a
+    URL run is the address they pasted.
+    """
+    if state.get("input_type") != "url":
+        return ""
+    for key in ("raw_text", "raw_input"):
+        value = state.get(key)
+        if isinstance(value, str) and "://" in value:
+            return canonical_url(value)
+    return ""
+
+
+def _same_page(left: str, right: str) -> bool:
+    """True when two URLs are the same article, scheme aside.
+
+    canonical_url keeps http and https distinct. A search result that
+    flips the scheme is still the page the person already handed us.
+    """
+    a = canonical_url(left)
+    b = canonical_url(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return a.split("://", 1)[-1] == b.split("://", 1)[-1]
+
+
+def _is_submitted_page(state: dict, url: str) -> bool:
+    submitted = _submitted_page(state)
+    return bool(submitted) and _same_page(url, submitted)
+
+
+def _entities_in_claim(entities, claim: str, *, limit: int) -> dict:
+    """At most `limit` entity strings that actually occur in the claim.
+
+    The order is the order _entity_bits already walks, so the verify
+    line stays stable. An organisation named only in a later paragraph
+    of a long article is not in the core sentence and is left out.
+    """
+    if not isinstance(entities, dict) or limit <= 0:
+        return {}
+    haystack = " ".join(str(claim).casefold().split())
+    if not haystack:
+        return {}
+    keys = list(_ENTITY_KEYS) + sorted(
+        key for key in entities if key not in _ENTITY_KEYS
+    )
+    kept: dict[str, list[str]] = {}
+    count = 0
+    for key in keys:
+        value = entities.get(key)
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            continue
+        for item in value:
+            text = " ".join(str(item).split())
+            if not text or text.casefold() not in haystack:
+                continue
+            if count >= limit:
+                return kept
+            kept.setdefault(key, []).append(text)
+            count += 1
+    return kept
 
 
 def _claim_text(state: dict) -> str:

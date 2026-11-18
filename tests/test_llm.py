@@ -274,6 +274,146 @@ def test_importing_llm_does_not_require_a_key():
     assert completed.returncode == 0, completed.stderr
 
 
+class _OkResponse:
+    text = '{"label": "ok", "score": 1}'
+    usage_metadata = None
+
+
+def _unavailable(message="This model is overloaded and UNAVAILABLE"):
+    from google.genai.errors import APIError
+
+    return APIError(
+        503,
+        {"error": {"code": 503, "status": "UNAVAILABLE", "message": message}},
+    )
+
+
+def _patch_outage(monkeypatch):
+    """Primary and fallback are names the fake client can tell apart.
+
+    Jitter is zero so the recorded sleeps are exactly 3, 10 and 30.
+    """
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-offline-key")
+    monkeypatch.setattr(config, "GEMINI_MODEL", "primary-model")
+    monkeypatch.setattr(config, "GEMINI_FALLBACK_MODEL", "fallback-model")
+    monkeypatch.setattr(llm, "_jitter", lambda: 0.0)
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(llm.time, "sleep", sleep)
+    return slept
+
+
+def _install_models(monkeypatch, generate):
+    class _Models:
+        def generate_content(self, **kwargs):
+            return generate(kwargs)
+
+    class _Client:
+        def __init__(self):
+            self.models = _Models()
+
+    monkeypatch.setattr(llm, "_client", lambda *args, **kwargs: _Client())
+
+
+def test_transient_503_then_success_backs_off_once(monkeypatch):
+    slept = _patch_outage(monkeypatch)
+    calls = []
+
+    def generate(kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) == 1:
+            raise _unavailable()
+        return _OkResponse()
+
+    _install_models(monkeypatch, generate)
+    result = call_structured("a claim", Note, purpose="stance")
+    assert result.score == 1
+    assert calls == ["primary-model", "primary-model"]
+    assert slept == [3.0]
+    assert calls_today() == 1
+    row = get_usage()[-1]
+    assert row["success"] is True
+    assert row["fallback"] is False
+    assert row["model_used"] == "primary-model"
+
+
+def test_four_503s_use_the_fallback_once(monkeypatch):
+    slept = _patch_outage(monkeypatch)
+    calls = []
+
+    def generate(kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "primary-model":
+            raise _unavailable()
+        return _OkResponse()
+
+    _install_models(monkeypatch, generate)
+    result = call_structured("a claim", Note, purpose="stance")
+    assert result.score == 1
+    assert calls == ["primary-model"] * 4 + ["fallback-model"]
+    assert slept == [3.0, 10.0, 30.0]
+    # Four rejections and one accepted body. Only the body counts.
+    assert calls_today() == 1
+    row = get_usage()[-1]
+    assert row["fallback"] is True
+    assert row["model_used"] == "fallback-model"
+    assert row["model"] == "primary-model"
+
+
+def test_fallback_failure_raises_and_does_not_count(monkeypatch):
+    _patch_outage(monkeypatch)
+    calls = []
+
+    def generate(kwargs):
+        calls.append(kwargs["model"])
+        raise _unavailable()
+
+    _install_models(monkeypatch, generate)
+    with pytest.raises(LLMError) as caught:
+        call_structured("a claim", Note, purpose="stance")
+    assert caught.value.purpose == "stance"
+    assert calls == ["primary-model"] * 4 + ["fallback-model"]
+    assert calls_today() == 0
+    row = get_usage()[-1]
+    assert row["success"] is False
+    assert row["fallback"] is True
+    assert row["model_used"] == "fallback-model"
+
+
+def test_per_minute_429_still_waits_once(monkeypatch):
+    from google.genai.errors import APIError
+
+    slept = _patch_outage(monkeypatch)
+    calls = []
+
+    def generate(kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) == 1:
+            raise APIError(
+                429,
+                {
+                    "error": {
+                        "code": 429,
+                        "status": "RESOURCE_EXHAUSTED",
+                        "message": "Rate limit exceeded, retry in 2s",
+                    }
+                },
+            )
+        return _OkResponse()
+
+    _install_models(monkeypatch, generate)
+    result = call_structured("a claim", Note, purpose="stance")
+    assert result.score == 1
+    assert calls == ["primary-model", "primary-model"]
+    assert slept == [2.0]
+    assert calls_today() == 1
+    assert get_usage()[-1]["fallback"] is False
+
+
 class Ping(BaseModel):
     ok: bool
 
