@@ -19,6 +19,24 @@ RAW_DIR = DATA_DIR / "raw"
 MEMORY_DIR = DATA_DIR / "memory"
 EVAL_DIR = DATA_DIR / "eval"
 
+# Box 1–2. Hashes only: sha256 and MinHash for text, sha256 and phash
+# for an image. Never the message, a name, or a phone number. Tests
+# replace this with a temporary file so pytest cannot write the copy
+# under data/. data/ itself is gitignored.
+SUBMISSIONS_DB = DATA_DIR / "submissions.db"
+
+# Box 1–2. The downscaled JPEG that extract reads back. The file name is
+# the sha256 of those bytes. ClaimState keeps the path, not the pixels:
+# the LangGraph checkpointer would otherwise store every screenshot.
+# Tests point this at a temporary directory. data/ is gitignored.
+UPLOADS_DIR = DATA_DIR / "uploads"
+
+# On when a person submits a forward. The evaluation sets it False.
+# Scoring an article is not that article being forwarded again, and
+# box 11's reach reads submission_count. A measured claim must not
+# look like a crowd.
+RECORD_SUBMISSIONS = True
+
 # Read-only inputs. See DATA.md. Never load the `content` column.
 CLASSIFIED_PATH = RAW_DIR / "classified_v2.parquet"
 EMBEDDINGS_PATH = RAW_DIR / "bge_m3_primary_claim.parquet"
@@ -59,6 +77,27 @@ DOMAINS = (
     "Entertainment & celebrities",
     "Sports",
     "Science & technology",
+)
+
+# The warning-sign labels on classified_v2.parquet. Counted 18 Nov 2026
+# from that file with columns=["red_flags"] only (the article text was
+# not loaded). 52,678 rows: 22,273 had an empty list, and every other
+# value was one of the eleven strings below. No other label appeared.
+# The order is the order in prompts/prompt_v4a.txt, which is where the
+# labels were defined. Box 3 may return a subset. Anything else is a
+# schema miss and the extract call is retried.
+RED_FLAGS = (
+    "Urgency",
+    "Fear or outrage",
+    "Fake or vague authority",
+    "Miracle or absolute claim",
+    "Free money or guaranteed returns",
+    "Request for personal data or payment",
+    "Suspicious link or contact",
+    "Call to forward",
+    "Sensational style",
+    "Emotional appeal",
+    "Unverifiable source",
 )
 
 # Provisional closeness cutoffs on unit-length BGE-M3 cosines. Stage D grid
@@ -135,6 +174,12 @@ LLM_PROVIDER = "gemini"
 # in about a second, which is what a veto needs.
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
+# Used once, after the primary model has already waited out a 503. Not a
+# "latest" alias, for the same reason as GEMINI_MODEL. gemini-2.5-flash and
+# gemini-2.5-flash-lite 404 for this key. gemini-3.1-flash-lite answered a
+# one-field schema call in about a second.
+GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite"
+
 # One call must not stall the graph. The client sends this as a timeout;
 # a hung request becomes an error the box can record, not an open wait.
 LLM_TIMEOUT_S = 60
@@ -146,12 +191,15 @@ LLM_CACHE = True
 LLM_CACHE_DIR = DATA_DIR / "cache" / "llm"
 
 # Free-tier ceiling for real Gemini calls. Cached and fake calls do not
-# count. 150 is a starting cap, tuned to the project's own limit; the
-# gateway reads it on every real call so a change here is the whole change.
-# The day is Pacific time because that is when Gemini resets the quota.
-LLM_DAILY_MAX = 150
+# count. 400 is 80% of the real free-tier limit of 500 requests/day for
+# gemini-3.5-flash-lite. The gateway reads this on every real call, so a
+# change here is the whole change. The day is Pacific time because that
+# is when Gemini resets the quota.
+LLM_DAILY_MAX = 400
 # Real calls per 60 seconds in this process. 8 stays under the free-tier
-# per-minute window with a little room for the clock being wrong.
+# per-minute window with a little room for the clock being wrong. The RPM
+# limiter is per process, so never run two pipeline processes at once
+# (two parallel processes exceeded Google's 15/min limit).
 LLM_RPM = 8
 
 # Paired-term floor. A missing key term whose nearest word on the other
@@ -352,8 +400,16 @@ TIER1_HOSTS = (
     "worldbank.org",
 )
 TIER2_HOSTS = (
-    # Wires. PTI's English wire is ptinews.com.
+    # Wires. PTI's English wire is ptinews.com. ANI, IANS, and UNI are the
+    # other national wires a newsroom copies from. A wire has an editor and
+    # a corrections desk, which is the tier-2 bar, so their own sites are
+    # not unknown hosts. ianslive.in is IANS's live host. Its registrable
+    # domain is not ians.in, so listing only ians.in would leave it at tier 4.
     "ptinews.com",
+    "aninews.in",
+    "ians.in",
+    "ianslive.in",
+    "uniindia.com",
     "reuters.com",
     "apnews.com",
     # Papers and broadcasters a reader can hold to a corrections desk.
@@ -394,6 +450,28 @@ TIER2_HOSTS = (
     "telegraphindia.com",
     "business-standard.com",
     "financialexpress.com",
+    # More national newsrooms. The tier is editorial standards: a named
+    # newsroom and a corrections policy, not political leaning. scroll.in,
+    # livemint.com, hindustantimes.com, and indiatoday.in are already
+    # listed above. frontline.thehindu.com is thehindu.com once the
+    # registrable domain is taken, and that host is already tier 2.
+    # thequint.com's news pages are this tier. Its WebQoof path stays a
+    # fact-checker and is still blocked when the fact-check block is on.
+    "tribuneindia.com",
+    "deccanchronicle.com",
+    "news18.com",
+    "firstpost.com",
+    "outlookindia.com",
+    "theweek.in",
+    "businesstoday.in",
+    "wionews.com",
+    "mid-day.com",
+    "freepressjournal.in",
+    "thewire.in",
+    "thequint.com",
+    "frontline.thehindu.com",
+    "abplive.com",
+    "zeebiz.com",
     # Publishers of peer-reviewed journals. A blog that cites a paper is
     # not this list; the journal's own host is.
     "nature.com",
@@ -416,14 +494,9 @@ TIER2_SUFFIXES = (".edu", ".edu.", ".ac.")
 TIER3_HOSTS = (
     "wikipedia.org",
     # Smaller newsrooms. Not the tier-2 list, still a newsroom.
-    "news18.com",
     "bloomberg.com",
     "forbes.com",
     "time.com",
-    "thewire.in",
-    "firstpost.com",
-    "outlookindia.com",
-    "businesstoday.in",
     "gulfnews.com",
     "pbs.org",
     "npr.org",
@@ -499,6 +572,14 @@ OFFICIAL_DOMAINS = {
         # Indian health forwards constantly cite WHO. It is the primary
         # source for those sentences, not a news site.
         "who.int",
+        # A cure claim is checked against trials and reviews. Those
+        # papers are on NIH, and PubMed is the ncbi host under it.
+        "nih.gov",
+        "ncbi.nlm.nih.gov",
+        # Diabetes-specific guidance. A "garlic cures diabetes" forward
+        # is the kind of sentence these two bodies publish on.
+        "diabetes.org",
+        "idf.org",
         "pib.gov.in",
     ),
     "Disasters & accidents": (

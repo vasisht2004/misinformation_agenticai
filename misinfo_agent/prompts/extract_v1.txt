@@ -1,0 +1,71 @@
+You read one submission and write the claim the way it circulated.
+The verdict is not yours. Evidence decides that later. You only write
+what was said, and you do not add "falsely", "claims", "reportedly",
+or a fact-checker's conclusion.
+
+The claim field follows the same rule as primary_claim: one sentence,
+at most 30 words, written the way the people sharing it would say it.
+Example: "Video shows Muslims celebrating Pakistan's cricket win in Bengaluru."
+
+Input type: __INPUT_TYPE__
+
+Text (cleaned forward, article lede, or OCR plus caption):
+__TEXT__
+
+Headline (empty when this is not a URL):
+__HEADLINE__
+
+Body (empty when this is not a URL; may be longer than the text above):
+__BODY__
+
+OCR (empty when this is not an image):
+__OCR__
+
+Caption (empty when the person did not type one):
+__CAPTION__
+
+If the input type is image, an image is attached. Describe only what is
+visible in it. A place or a date you cannot see is not a clue. "no date
+visible" and "no place visible" are valid answers. Do not guess from
+the caption that a building is in a city the picture does not show.
+
+If the input type is not image, leave visual_description, location_clues,
+and time_clues as empty strings.
+
+If the input type is url and the headline says something the body does
+not support, headline_body_mismatch is one line saying what differs.
+Otherwise leave it empty. Leave it empty when the input is not a url.
+
+checkable is false for an opinion, a joke, a prediction, a greeting, or
+anything else that names no event someone could look up. Then
+not_checkable_reason is a short phrase (opinion, joke, prediction,
+greeting) and the other fields may be empty. A rumour about the future
+stated as a fact ("the notes will be invalid on 1 December") is
+checkable. A wish or a forecast the speaker owns ("I think it will rain")
+is not.
+
+When checkable is true, fill every field:
+
+- claim: one sentence, at most 30 words, in the style above.
+- atomic_claims: 1 to 3 items. Exactly one has core true. That one is
+  the main allegation. If the submission says someone did A and then B,
+  those are two items, not one sentence with "and then". id is A1, A2,
+  or A3. A1 is the core when there is only one. Each item has checkable
+  true or false. checkable is false for a conspiracy or a motive ("the
+  government is hiding it", "to protect pharma companies"). Those are
+  not events a page can confirm. An event ("doctors confirmed this",
+  "schools are closed") is checkable true.
+- entities: people, orgs, places, dates, amounts copied from the
+  submission. Do not add a name that is not written in the text, the
+  OCR, the headline, or the body.
+- domain: exactly one of
+  __DOMAINS__
+  Choose by the subject of the claim. Fake cash schemes, banking, UPI,
+  jobs, loans, tax, and investment are "Finance & scams". A celebrity
+  death hoax is "Entertainment & celebrities", not Health.
+- red_flags: a subset of
+  __RED_FLAGS__
+  Include a label only when the wording shows it. An empty list is
+  allowed. Do not invent a label outside that list.
+
+Return JSON matching the schema. No prose and no markdown.

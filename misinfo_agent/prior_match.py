@@ -29,7 +29,7 @@ from misinfo_agent.config import (
     TAU_LOW,
 )
 from misinfo_agent.llm import call_structured
-from misinfo_agent.memory import bm25_token_pairs, strip_rupee_amounts
+from misinfo_agent.memory import bm25_token_pairs, get_encoder, strip_rupee_amounts
 
 # Shown when the veto cannot run. Exact is not kept: a failed call is not
 # evidence that the two sentences are the same claim.
@@ -860,7 +860,6 @@ _COMMUNITY_RE = re.compile(
     re.IGNORECASE,
 )
 _WORD_CACHE: dict[str, object] = {}
-_WORD_ENCODER = None
 
 
 def _community_terms(text: str) -> list[str]:
@@ -1005,19 +1004,13 @@ def _word_vectors(words: list[str]) -> dict:
 
 
 def _word_encoder():
-    global _WORD_ENCODER
-    if _WORD_ENCODER is None:
-        from sentence_transformers import SentenceTransformer
+    """The one BGE-M3 this process already uses for memory and passages.
 
-        from misinfo_agent.config import MAX_SEQ_LEN, MODEL_NAME
-        from misinfo_agent.memory import _device
-
-        encoder = SentenceTransformer(MODEL_NAME, device=_device())
-        # Same window as the memory. A single word is well inside it; leaving
-        # the library default would still be a different tower than E.
-        encoder.max_seq_length = MAX_SEQ_LEN
-        _WORD_ENCODER = encoder
-    return _WORD_ENCODER
+    A second SentenceTransformer would read the weights again and could
+    leave max_seq_length at the library default, so a word cosine would
+    not be the same space as the claim cosine.
+    """
+    return get_encoder()
 
 
 def _quoted(words: list[str]) -> str:

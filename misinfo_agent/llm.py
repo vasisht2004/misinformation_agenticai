@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -36,9 +37,16 @@ T = TypeVar("T", bound=BaseModel)
 # satisfy.
 _MAX_RETRIES = 2
 
-# Seconds before a retry. Short on purpose: a schema miss is the model being
-# sloppy, not a rate limit, and box 7 may already be on a 60s budget.
+# Seconds before a schema retry. Short on purpose: a schema miss is the model
+# being sloppy, not a rate limit, and box 7 may already be on a 60s budget.
+# A 503 is not this loop. That wait is _TRANSIENT_BACKOFF_S.
 _BACKOFF_S = 0.05
+
+# One attempt, then these waits, then give up on that model. A 503 is often
+# gone in a few seconds and still gone if we hammer it. The spread is the
+# difference between a blip and an outage. Jitter is added on top so every
+# claim in one process does not retry on the same tick.
+_TRANSIENT_BACKOFF_S = (3.0, 10.0, 30.0)
 
 # 429 is not in this set. A quota error is not a blip: retrying it on the
 # generic loop is how a free tier gets exhausted. Quota is handled on its own.
@@ -109,8 +117,9 @@ def call_structured(
     started = time.perf_counter()
     model = _model_name()
     # Sleep spent on the per-minute cap or a single 429 wait. Schema retries
-    # use a different, short backoff and are not quota time.
-    meter = {"quota_wait_s": 0.0}
+    # and the 503 waits use different clocks and are not quota time.
+    # model_used stays the primary until a fallback call actually runs.
+    meter = {"quota_wait_s": 0.0, "model_used": model, "fallback": False}
     cache_path = _cache_path(model, prompt_version, prompt, schema, images)
     cached = _read_cache(cache_path, schema) if cache_path is not None else None
     if cached is not None:
@@ -121,6 +130,8 @@ def call_structured(
         _record(
             purpose=purpose,
             model=model,
+            model_used=model,
+            fallback=False,
             prompt_version=prompt_version,
             started=started,
             success=True,
@@ -143,9 +154,13 @@ def call_structured(
         except LLMError:
             # Missing key, the daily cap, or a non-retryable API error.
             # Already safe to show. A quota error is not retried here.
+            # A 503 that survived the long backoff is this path too: the
+            # transient loop already tried the fallback once.
             _record(
                 purpose=purpose,
                 model=model,
+                model_used=meter["model_used"],
+                fallback=bool(meter["fallback"]),
                 prompt_version=prompt_version,
                 started=started,
                 success=False,
@@ -167,6 +182,8 @@ def call_structured(
             _record(
                 purpose=purpose,
                 model=model,
+                model_used=meter["model_used"],
+                fallback=bool(meter["fallback"]),
                 prompt_version=prompt_version,
                 started=started,
                 success=True,
@@ -184,6 +201,8 @@ def call_structured(
     _record(
         purpose=purpose,
         model=model,
+        model_used=meter["model_used"],
+        fallback=bool(meter["fallback"]),
         prompt_version=prompt_version,
         started=started,
         success=False,
@@ -236,11 +255,11 @@ def _produce(prompt, schema, images, purpose, model, temperature, meter):
         return _FAKE(prompt, schema, images), None
     if config.LLM_PROVIDER != "gemini":
         raise LLMError(purpose, f"unsupported provider {config.LLM_PROVIDER}")
-    # Cap first, then the key, then the slot. A missing key must not count
-    # as a call, and a full day must not build a client.
+    # Cap first, then the key. A missing key must not count as a call, and
+    # a full day must not build a client. The day is counted only after a
+    # body comes back, inside _generate_once, so a 503 does not spend it.
     _refuse_if_daily_cap(purpose)
     key = _require_key(purpose)
-    _take_real_slot(purpose, meter)
     text, tokens = _gemini(
         prompt, schema, images, purpose, model, temperature, key, meter
     )
@@ -283,11 +302,13 @@ def _load_env() -> None:
 
 
 def calls_today() -> int:
-    """Real Gemini calls already made on today's Pacific date.
+    """Accepted Gemini responses already received on today's Pacific date.
 
-    Scripts print this before and after a batch. Cached and fake calls
-    are not in the number. A missing file, or a file from an earlier
-    Pacific day, is zero: the quota day has reset.
+    A response counts whether or not the JSON then validated. A request
+    the API rejected (503, timeout, 429) does not: it did not spend the
+    day's quota. Cached and fake calls are not in the number. A missing
+    file, or a file from an earlier Pacific day, is zero: the quota day
+    has reset.
     """
     with _QUOTA_LOCK:
         return _count_today_unlocked()
@@ -304,14 +325,28 @@ def _refuse_if_daily_cap(purpose: str) -> None:
             raise _daily_cap(purpose, count)
 
 
-def _take_real_slot(purpose: str, meter: dict) -> None:
-    """Sleep to stay under LLM_RPM, then count this real call."""
+def _prepare_attempt(purpose: str, meter: dict) -> None:
+    """Sleep to stay under LLM_RPM. Does not count the day.
+
+    A 503 is still a request, so it still takes a place in the minute
+    window. It is not a billed day-call until a body comes back.
+    """
     with _QUOTA_LOCK:
         count = _count_today_unlocked()
         if count >= config.LLM_DAILY_MAX:
             raise _daily_cap(purpose, count)
         meter["quota_wait_s"] += _pace_unlocked()
-        _set_today_unlocked(count + 1)
+
+
+def _count_accepted() -> None:
+    """One response came back. A 503, a timeout, or a 429 never gets here.
+
+    The cap tracks calls the provider accepted. Counting a rejection would
+    stop the run while the day's quota was still available. A body that
+    then fails schema validation still counts: the model did answer.
+    """
+    with _QUOTA_LOCK:
+        _set_today_unlocked(_count_today_unlocked() + 1)
 
 
 def _daily_cap(purpose: str, count: int) -> LLMQuotaError:
@@ -322,16 +357,16 @@ def _daily_cap(purpose: str, count: int) -> LLMQuotaError:
 
 
 def _increment_real_call(purpose: str) -> None:
-    """Count the single extra attempt after a per-minute 429.
+    """Mark the single extra attempt after a per-minute 429.
 
     No second pace: the caller already slept for the delay Gemini asked
-    for. If that extra attempt would cross the daily cap, stop.
+    for. The daily count waits until that attempt returns a body. If the
+    extra attempt would cross the daily cap, stop before sending it.
     """
     with _QUOTA_LOCK:
         count = _count_today_unlocked()
         if count >= config.LLM_DAILY_MAX:
             raise _daily_cap(purpose, count)
-        _set_today_unlocked(count + 1)
         _RECENT_REAL_CALLS.append(time.monotonic())
 
 
@@ -535,6 +570,11 @@ def _client(key: str, purpose: str, prompt: str):
     return client
 
 
+def _jitter() -> float:
+    """A fraction of a second, so a shared 503 does not retry in lockstep."""
+    return random.uniform(0.0, 0.4)
+
+
 def _gemini(prompt, schema, images, purpose, model, temperature, key, meter):
     from google.genai import types
 
@@ -556,13 +596,73 @@ def _gemini(prompt, schema, images, purpose, model, temperature, key, meter):
         # is not trusted: a field the schema requires can still arrive empty.
         response_json_schema=schema.model_json_schema(),
     )
+    response = _generate_with_fallback(
+        client, model, contents, gen_config, purpose, prompt, key, meter
+    )
+    return _response_text(response), _token_counts(response)
+
+
+def _generate_with_fallback(client, model, contents, gen_config, purpose, prompt, key, meter):
+    """Primary model, with the long backoff, then the fallback model once.
+
+    A daily 429 or a 400 never reaches the fallback. Those are not an
+    outage of this model. Only a transient failure that survived 3s, 10s
+    and 30s does. The fallback is one try: a second outage is the caller's
+    error, not another minute of waiting.
+    """
+    response = _generate_transient(
+        client, model, contents, gen_config, purpose, prompt, key, meter
+    )
+    if response is not None:
+        return response
+    fallback = str(getattr(config, "GEMINI_FALLBACK_MODEL", "") or "").strip()
+    reason = meter.get("transient_reason") or "the model call failed"
+    # The same name would be the same outage. An empty name has nothing to try.
+    if not fallback or fallback == model:
+        raise LLMError(purpose, reason)
+    meter["fallback"] = True
+    meter["model_used"] = fallback
+    try:
+        return _generate_once(
+            client, fallback, contents, gen_config, purpose, prompt, key, meter
+        )
+    except _Retryable as exc:
+        raise LLMError(purpose, exc.reason) from None
+
+
+def _generate_transient(client, model, contents, gen_config, purpose, prompt, key, meter):
+    """Up to four tries. None means every one of them was a transient error.
+
+    The sleeps sit between tries, not after the last one. The fallback, if
+    any, starts as soon as the primary has failed for good.
+    """
+    reason = "the model call failed"
+    attempts = len(_TRANSIENT_BACKOFF_S) + 1
+    for attempt in range(attempts):
+        try:
+            return _generate_once(
+                client, model, contents, gen_config, purpose, prompt, key, meter
+            )
+        except _Retryable as exc:
+            reason = exc.reason
+            if attempt >= len(_TRANSIENT_BACKOFF_S):
+                break
+            time.sleep(_TRANSIENT_BACKOFF_S[attempt] + _jitter())
+    meter["transient_reason"] = reason
+    return None
+
+
+def _generate_once(client, model, contents, gen_config, purpose, prompt, key, meter):
+    """One HTTP attempt. Counts the day only when a response comes back."""
+    _prepare_attempt(purpose, meter)
     try:
         response = _generate(client, model, contents, gen_config)
     except Exception as exc:
         response = _after_api_error(
             exc, client, model, contents, gen_config, purpose, prompt, key, meter
         )
-    return _response_text(response), _token_counts(response)
+    _count_accepted()
+    return response
 
 
 def _mime(blob: bytes) -> str:
@@ -600,6 +700,13 @@ def _token_counts(response) -> dict:
 
 
 def _is_transient(exc: BaseException) -> bool:
+    """503, 500, UNAVAILABLE, overloaded, and timeouts. Not a 429.
+
+    The status code is the usual signal. Some SDK errors only carry the
+    word UNAVAILABLE or overloaded, and a hung socket arrives as a timeout
+    rather than an HTTP code. A quota error must not land here: that path
+    waits once for the minute window, or stops if the day is gone.
+    """
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return True
     try:
@@ -611,9 +718,20 @@ def _is_transient(exc: BaseException) -> bool:
     try:
         from google.genai.errors import APIError
     except Exception:
-        return False
-    if isinstance(exc, APIError):
-        return getattr(exc, "code", None) in _RETRYABLE_STATUS
+        APIError = None
+    if APIError is not None and isinstance(exc, APIError):
+        if getattr(exc, "code", None) in _RETRYABLE_STATUS:
+            return True
+        return _transient_text(exc)
+    return _transient_text(exc)
+
+
+def _transient_text(exc: BaseException) -> bool:
+    text = str(exc).upper()
+    if "UNAVAILABLE" in text or "OVERLOADED" in text:
+        return True
+    if "TIMED OUT" in text or "TIMEOUT" in text:
+        return True
     return False
 
 
@@ -679,11 +797,17 @@ def _record(
     cached,
     tokens,
     quota_wait_s,
+    model_used=None,
+    fallback=False,
 ) -> None:
     counts = tokens or {}
     row = {
         "purpose": purpose,
         "model": model,
+        # The model that was actually called. `model` stays the primary so
+        # a cache key and a fallback answer are not the same name.
+        "model_used": model_used or model,
+        "fallback": bool(fallback),
         "prompt_version": prompt_version,
         "latency_s": round(time.perf_counter() - started, 6),
         "success": success,

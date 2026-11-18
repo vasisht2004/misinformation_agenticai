@@ -118,6 +118,148 @@ def test_query_kinds_for_every_domain():
         assert len(similar) <= 5
 
 
+def test_one_atomic_claim_keeps_the_same_plan():
+    plain = build_queries(_state("Health"))
+    state = _state("Health")
+    state["atomic_claims"] = [{"id": "A1", "text": state["claim"], "core": True}]
+    assert [query.model_dump() for query in build_queries(state)] == [
+        query.model_dump() for query in plain
+    ]
+
+
+def test_a_second_atomic_claim_adds_one_neutral_query():
+    # The fixed lines search the core event. The campus visit is not in
+    # that sentence, so it needs its own neutral line, and the older lead
+    # still fits under the per-claim cap.
+    state = _state(
+        "Health",
+        claim="CLAIM the ministry banned the medicine and then closed the clinics",
+    )
+    state["atomic_claims"] = [
+        {"id": "A1", "text": "CLAIM the ministry banned the medicine", "core": True},
+        {"id": "A2", "text": "The ministry closed the clinics", "core": False},
+    ]
+    state["match_type"] = "similar"
+    state["leads"] = [{"primary_claim": "An older wording of this claim"}]
+    queries = build_queries(state)
+    texts = [query.text for query in queries]
+    assert queries[0].text == "CLAIM the ministry banned the medicine"
+    assert queries[0].kind == "neutral"
+    assert "The ministry closed the clinics" in texts
+    assert "An older wording of this claim" in texts
+    assert len(queries) <= config.MAX_SEARCHES_PER_CLAIM
+    assert len([query for query in queries if query.kind == "neutral"]) == 2
+
+
+def test_a_motive_atomic_claim_adds_no_query_and_the_plan_stops_at_six():
+    state = _state(
+        "Health",
+        claim="CLAIM garlic juice cures diabetes and the government is hiding it",
+    )
+    state["atomic_claims"] = [
+        {"id": "A1", "text": "CLAIM garlic juice cures diabetes", "core": True, "checkable": True},
+        {"id": "A2", "text": "AIIMS Delhi doctors confirmed the remedy", "core": False, "checkable": True},
+        {"id": "A3", "text": "The government is hiding it", "core": False, "checkable": False},
+    ]
+    state["match_type"] = "similar"
+    state["leads"] = [{"primary_claim": "An older wording of this claim"}]
+    queries = build_queries(state)
+    texts = [query.text for query in queries]
+    assert "AIIMS Delhi doctors confirmed the remedy" in texts
+    assert "The government is hiding it" not in texts
+    # Four core lines, the one checkable extra, and the lead. Six is the
+    # plan cap, so two searches remain for the top-up.
+    assert len(queries) <= 6
+    assert queries[-1].kind == "lead"
+
+
+def test_two_checkable_extras_leave_the_lead_out_to_keep_two_searches():
+    state = _state("Health", claim="CLAIM the ministry banned the medicine and then closed the clinics")
+    state["atomic_claims"] = [
+        {"id": "A1", "text": "CLAIM the ministry banned the medicine", "core": True, "checkable": True},
+        {"id": "A2", "text": "The ministry closed the clinics", "core": False, "checkable": True},
+        {"id": "A3", "text": "The ministry reopened them on Tuesday", "core": False, "checkable": True},
+    ]
+    state["match_type"] = "similar"
+    state["leads"] = [{"primary_claim": "An older wording of this claim"}]
+    queries = build_queries(state)
+    texts = [query.text for query in queries]
+    assert "The ministry closed the clinics" in texts
+    assert "The ministry reopened them on Tuesday" in texts
+    assert len(queries) == 6
+    assert all(query.kind != "lead" for query in queries)
+
+
+def test_verify_query_keeps_five_entities_from_the_core_claim():
+    from misinfo_agent.investigate import _entities_in_claim
+
+    names = ["Modi", "Rahul", "Kejriwal", "Stalin", "Mamata", "Yogi"]
+    claim = "Modi Rahul Kejriwal Stalin Mamata Yogi met"
+    entities = {"people": names, "places": ["IIM Bangalore"], "orgs": ["Namma Metro"]}
+    kept = _entities_in_claim(entities, claim, limit=5)
+    flat = [item for values in kept.values() for item in values]
+    # Five names from the sentence. The sixth is past the cap, and a name
+    # that is not in the sentence is not a candidate.
+    assert flat == names[:5]
+    state = _state("Politics & elections", claim=claim, entities=entities)
+    verify = {query.kind: query for query in build_queries(state)}["verify"].text
+    assert "IIM Bangalore" not in verify
+    assert "Namma Metro" not in verify
+    for name in names[:5]:
+        assert name in verify
+
+
+def test_health_official_query_includes_cure_sources():
+    hosts = config.OFFICIAL_DOMAINS["Health"]
+    for host in ("who.int", "nih.gov", "ncbi.nlm.nih.gov", "mohfw.gov.in", "icmr.gov.in", "diabetes.org", "idf.org"):
+        assert host in hosts
+
+
+def test_submitted_url_is_dropped_from_search_and_evidence():
+    from misinfo_agent.investigate import build_evidence
+
+    state = _state("Health", claim="CLAIM the ministry banned the medicine")
+    state["input_type"] = "url"
+    state["raw_text"] = "https://www.Example.com/story?utm_source=whatsapp"
+
+    def fake(query, **kwargs):
+        return [
+            _hit("https://example.com/story", "the page itself", 0.99),
+            _hit("https://www.bbc.com/news/other", "a newsroom", 0.4),
+        ]
+
+    set_fake_search(fake)
+    try:
+        hits = gather_candidates(state)
+    finally:
+        set_fake_search(None)
+    urls = [hit.url for hit in hits]
+    assert urls == ["https://bbc.com/news/other"]
+    quote = "The ministry banned the medicine yesterday"
+    rows = build_evidence(
+        state,
+        [
+            {
+                "passage": _stance_passage("P1", "https://example.com/story", quote, 0.9),
+                "stance": "supports",
+                "quote": quote,
+                "reason": "It repeats the page",
+                "quote_unverified": False,
+                "atomic_id": "A1",
+            },
+            {
+                "passage": _stance_passage("P2", "https://www.bbc.com/news/other", quote, 0.8),
+                "stance": "supports",
+                "quote": quote,
+                "reason": "A newsroom confirms it",
+                "quote_unverified": False,
+                "atomic_id": "A1",
+            },
+        ],
+    )
+    assert [row["url"] for row in rows] == ["https://www.bbc.com/news/other"]
+
+
 def test_lead_query_only_when_similar():
     state = _state("Health")
     assert "lead" not in [query.kind for query in build_queries(state)]
@@ -519,6 +661,9 @@ def test_each_factcheck_rule_drops_and_a_press_release_stays(monkeypatch):
     assert kept("https://checkyourfact.com/story") == []
     assert kept("https://africacheck.org/fact-checks/story") == []
     assert kept("https://example.com/news/webqoof/story") == []
+    # The Quint's newsroom is tier 2. WebQoof, on the same host, is the
+    # fact-check desk and stays out of a blocked-mode search.
+    assert kept("https://www.thequint.com/news/webqoof/garlic-cures-diabetes") == []
     # A normal press release is the page the official query is for.
     release = kept(
         "https://pib.gov.in/PressRelease.aspx",
@@ -698,11 +843,16 @@ def test_encoder_loads_once(monkeypatch):
         return sentinel
 
     monkeypatch.setattr(memory, "_build_encoder", build)
+    import misinfo_agent.prior_match as prior_match
+
     assert memory.get_encoder() is sentinel
     assert memory.get_encoder() is sentinel
     memo = memory.ClaimMemory.__new__(memory.ClaimMemory)
     memo._encoder = None
     assert memo._encoder_model() is sentinel
+    # Box 6 used to build its own SentenceTransformer. The word vectors
+    # have to be the same object, or BGE-M3 loads a second time.
+    assert prior_match._word_encoder() is sentinel
     assert calls["n"] == 1
 
 
@@ -1009,6 +1159,30 @@ def test_quote_that_is_not_in_the_passage_becomes_neutral():
     assert build_evidence({"claim_date": "2024-01-01"}, labelled) == []
 
 
+def test_single_and_double_quotes_still_count_as_the_same_sentence():
+    from misinfo_agent.investigate import StanceJudgement, apply_stance
+
+    # The page uses double quotes. The model writes single quotes. The
+    # words were copied, so a real refute must not become neutral.
+    text = (
+        'The Union Health Ministry termed the reports "misleading, incorrect, and baseless" '
+        "and said it had not ordered warning labels."
+    )
+    labelled, unverified = apply_stance(
+        "The ministry ordered warning labels on samosas",
+        [_stance_passage("P1", "https://www.ndtv.com/a", text)],
+        [StanceJudgement(
+            passage_id="P1",
+            stance="refutes",
+            quote="The Union Health Ministry termed the reports 'misleading, incorrect, and baseless'",
+            reason="The ministry denied the reports",
+        )],
+    )
+    assert labelled[0]["stance"] == "refutes"
+    assert labelled[0]["quote_unverified"] is False
+    assert unverified == 0
+
+
 def test_a_passage_that_only_repeats_the_claim_is_neutral():
     from misinfo_agent.investigate import StanceJudgement, apply_stance, build_evidence
 
@@ -1044,6 +1218,123 @@ def test_a_passage_that_only_repeats_the_claim_is_neutral():
     assert "CAN refute" in rules
     assert "8 November 2016" in rules
     assert "side remark" in rules
+
+
+def test_stance_v4_has_the_tense_and_named_after_rules():
+    rules = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "misinfo_agent" / "prompts" / "stance_v4.txt"
+    ).read_text(encoding="utf-8")
+    assert 'reason must be "planned, not confirmed"' in rules
+    assert "visited, inaugurated, announced, banned" in rules
+    assert "IIM Bangalore metro station" in rules
+    assert "Modi stadium" in rules
+    assert "named after" in rules
+
+
+def test_stance_v5_rules_never_change_a_refute():
+    rules = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "misinfo_agent" / "prompts" / "stance_v5.txt"
+    ).read_text(encoding="utf-8")
+    assert "visited, inaugurated, was banned, announced" in rules
+    assert "IIM Bangalore metro station" in rules
+    assert "Modi stadium" in rules
+    assert "never turn a refute into neutral" in rules
+    assert "will continue corporate banking" in rules
+    assert "is withdrawing" in rules
+    assert "will be invalid from 1 December" in rules
+
+
+def test_stance_v6_different_event_is_neutral():
+    # v6 stays on disk. v7 is the call that runs, and it still contains
+    # every v6 rule so a different event stays neutral and a real
+    # contradiction stays a refute.
+    v6 = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "misinfo_agent" / "prompts" / "stance_v6.txt"
+    ).read_text(encoding="utf-8")
+    rules = v6
+    assert "different event" in rules
+    assert "different metro line" in rules
+    assert "PM Modi inaugurated the Pink Line of Namma Metro" in rules
+    assert "PM Modi inaugurated the Yellow Line of Bangalore Metro" in rules
+    assert "different line, different event" in rules
+    assert "The Pink Line opening was postponed" in rules
+    assert "never turn a refute into neutral" in rules
+    assert "will continue corporate banking" in rules
+    assert "old event" in rules
+
+
+def test_stance_v7_keeps_v6_and_states_the_share_date():
+    from misinfo_agent.investigate import Passage, judge_stance
+    from misinfo_agent.llm import get_usage, set_fake
+
+    v6_rules = (
+        (__import__("pathlib").Path(__file__).resolve().parents[1]
+         / "misinfo_agent" / "prompts" / "stance_v6.txt")
+        .read_text(encoding="utf-8")
+        .split("CLAIM:")[0]
+    )
+    seen = {}
+
+    def fake(prompt, schema, images):
+        seen["prompt"] = prompt
+        seen["schema"] = schema.__name__
+        return {"judgements": []}
+
+    passage = Passage(
+        passage_id="P1",
+        url="https://example.com/a",
+        netloc="example.com",
+        title="t",
+        text="A passage about the Pink Line and nothing else of substance here.",
+        cos=0.9,
+        fetched=True,
+    )
+    state = {
+        "claim": "PM Modi inaugurated the Pink Line and then visited the campus",
+        "claim_date": "2026-11-18",
+        "atomic_claims": [
+            {"id": "A1", "text": "PM Modi inaugurated the Pink Line", "core": True, "checkable": True},
+            {"id": "A2", "text": "PM Modi visited the IIM Bangalore campus", "core": False, "checkable": True},
+        ],
+    }
+    before = len(get_usage())
+    set_fake(fake)
+    try:
+        judge_stance(state, [passage])
+    finally:
+        set_fake(None)
+    prompt = seen["prompt"]
+    # The multi-claim call is the v7 file plus one paragraph. The v6
+    # rules are in that file unchanged, and they apply per atomic claim.
+    assert v6_rules in prompt
+    assert "This claim was shared on 2026-11-18" in prompt
+    assert "till Monday" in prompt
+    assert "different occasion is NEUTRAL, not a refute" in prompt
+    assert "may slightly lower blood sugar" in prompt
+    assert "IIMB metro station" in prompt
+    assert "IIM Bangalore campus" in prompt
+    assert "Apply every rule above to that atomic claim alone" in prompt
+    assert seen["schema"] == "AtomicStanceBatch"
+    stance_rows = [row for row in get_usage()[before:] if row.get("purpose") == "stance"]
+    assert stance_rows[-1]["prompt_version"] == "stance_v7"
+
+    seen.clear()
+    single = {
+        "claim": "PM Modi inaugurated the Pink Line",
+        "claim_date": "2026-11-18",
+    }
+    set_fake(fake)
+    try:
+        judge_stance(single, [passage])
+    finally:
+        set_fake(None)
+    assert v6_rules in seen["prompt"]
+    assert "This claim was shared on 2026-11-18" in seen["prompt"]
+    assert "more than one atomic claim" not in seen["prompt"]
+    assert seen["schema"] == "StanceBatch"
 
 
 def test_credibility_tiers():
@@ -1092,6 +1383,12 @@ def test_credibility_tiers():
     assert credibility_tier("https://weather.gc.ca/city") == 1
     assert credibility_tier("https://news.uq.edu.au/article") == 2
     assert credibility_tier("https://www.ox.ac.uk/news") == 2
+    # National wires, the same bar as PTI. ianslive.in is its own host.
+    assert credibility_tier("https://www.tribuneindia.com/news/india/story") == 2
+    assert credibility_tier("https://www.aninews.in/news") == 2
+    assert credibility_tier("https://www.ians.in/news") == 2
+    assert credibility_tier("https://ianslive.in/news") == 2
+    assert credibility_tier("https://www.uniindia.com/news") == 2
 
 
 def test_minhash_groups_near_copies():
@@ -1165,6 +1462,81 @@ def test_evidence_rows_are_supports_and_refutes_only():
     assert rows[1]["group_id"] != rows[2]["group_id"]
 
 
+def test_a_group_with_both_stances_is_flagged_and_kept():
+    from misinfo_agent.investigate import _stats, build_evidence
+
+    rows = build_evidence(
+        {"claim_date": "2024-06-01"},
+        [
+            {
+                "passage": _stance_passage(
+                    "P1",
+                    "https://www.thehindu.com/a",
+                    "The bank confirmed the new rule applies from December.",
+                    0.9,
+                ),
+                "stance": "supports",
+                "quote": "The bank confirmed the new rule",
+                "reason": "It confirms the rule",
+                "quote_unverified": False,
+            },
+            {
+                "passage": _stance_passage(
+                    "P2",
+                    "https://www.thehindu.com/b",
+                    "The bank said the old notes remain valid.",
+                    0.8,
+                ),
+                "stance": "refutes",
+                "quote": "the old notes remain valid",
+                "reason": "It denies the rule",
+                "quote_unverified": False,
+            },
+            {
+                "passage": _stance_passage(
+                    "P3",
+                    "https://www.reuters.com/c",
+                    "Reuters reported that the ministry confirmed the rule.",
+                    0.7,
+                ),
+                "stance": "supports",
+                "quote": "the ministry confirmed the rule",
+                "reason": "A second newsroom agrees",
+                "quote_unverified": False,
+            },
+        ],
+    )
+    by_url = {row["url"]: row for row in rows}
+    hindu_support = by_url["https://www.thehindu.com/a"]
+    hindu_refute = by_url["https://www.thehindu.com/b"]
+    reuters = by_url["https://www.reuters.com/c"]
+    # Both sentences stay. The gate needs the disagreement, not a deletion.
+    assert len(rows) == 3
+    assert hindu_support["group_id"] == hindu_refute["group_id"]
+    assert hindu_support["group_id"] != reuters["group_id"]
+    assert hindu_support["stance"] == "supports"
+    assert hindu_refute["stance"] == "refutes"
+    assert hindu_support["group_conflict"] is True
+    assert hindu_refute["group_conflict"] is True
+    assert reuters["group_conflict"] is False
+    stats = _stats(
+        passages=[],
+        labelled=[],
+        evidence=rows,
+        pages=[],
+        searches=0,
+        llm_calls=0,
+        usage=[],
+        unverified=0,
+        notes=[],
+        started=0,
+        queries=[],
+        topup_used=False,
+        topup_queries=[],
+    )
+    assert stats["group_conflicts"] == [hindu_support["group_id"]]
+
+
 def test_search_quota_returns_a_partial_result():
     def fake(query, **kwargs):
         raise SearchQuotaError("investigate_neutral", "monthly cap")
@@ -1212,6 +1584,9 @@ def test_llm_error_keeps_the_passages(monkeypatch):
     assert result["passages"]
     assert result["investigate_stats"]["notes"]
     assert result["investigate_stats"]["llm_calls"] == 1
+    # An empty table after a failed call is a system error. Box 9 must not
+    # read it as "not enough evidence".
+    assert result["investigate_stats"]["stance_failed"] is True
 
 
 def test_stance_builds_an_evidence_row(monkeypatch):
@@ -1279,6 +1654,192 @@ def test_stance_builds_an_evidence_row(monkeypatch):
     assert row["stance"] == "supports"
     assert row["tier"] == 1
     assert row["quote"] == quote
+    assert row["atomic_id"] == "A1"
+    assert result["investigate_stats"]["stance_failed"] is False
+    # One claim: the per-atomic block is the same totals, under A1.
+    block = result["investigate_stats"]["by_atomic"]["A1"]
+    assert block["n_supports"] == 1
+    assert block["groups_supporting"] == 1
+
+
+def test_two_atomic_claims_label_each_passage_and_search_the_second(monkeypatch):
+    import misinfo_agent.investigate as investigate_module
+    from misinfo_agent.llm import set_fake
+
+    # The fake encoder reads the first token. CLAIM is the query vector.
+    monkeypatch.setattr(investigate_module, "get_encoder", lambda: _FakeEncoder())
+    quote = "The Reserve Bank said no circular has been issued"
+    # Eighty words or more, or fetch treats raw_content as a stub and tries
+    # the network, which an offline test refuses. The first token is the
+    # cosine the fake encoder reads.
+    page = (
+        "0.90 The Reserve Bank said no circular has been issued declaring the old notes invalid "
+        "from December and holders can keep using them every day at shops and banks across India "
+        "without exchanging them for a new series or meeting any deadline the forwarded message "
+        "invented for the public, and branches have been told to treat that message as a rumour "
+        "rather than a circular while cash machines continue to dispense the same notes to customers "
+        "who need cash for the market, the school fee, the rent and the train ticket home tonight "
+        "and the guard at the door kept repeating the same instruction to every person who asked "
+        "about a notice that the branch had never received from the head office during this week"
+    )
+
+    def fake_search(query, **kwargs):
+        return [
+            {
+                "url": "https://www.rbi.org.in/notice",
+                "title": "RBI",
+                "content": "snippet",
+                "score": 0.9,
+                "published_date": "2020-01-02",
+                "raw_content": page,
+            },
+            {
+                "url": "https://www.thehindu.com/story",
+                "title": "The Hindu",
+                "content": "snippet",
+                "score": 0.8,
+                "published_date": "2020-01-02",
+                "raw_content": page,
+            },
+        ]
+
+    def fake_llm(prompt, schema, images):
+        import re
+
+        ids = list(dict.fromkeys(re.findall(r"(?m)^(P\d+)$", prompt)))
+        judgements = []
+        for passage_id in ids:
+            judgements.append({
+                "passage_id": passage_id,
+                "atomic_id": "A1",
+                "stance": "supports",
+                "quote": quote,
+                "reason": "The bank confirms the ban.",
+            })
+            judgements.append({
+                "passage_id": passage_id,
+                "atomic_id": "A2",
+                "stance": "neutral",
+                "quote": "",
+                "reason": "The clinics are not mentioned.",
+            })
+        return {"judgements": judgements}
+
+    state = _state(
+        "Health",
+        claim="CLAIM the ministry banned the medicine and then closed the clinics",
+    )
+    state["atomic_claims"] = [
+        {"id": "A1", "text": "CLAIM the ministry banned the medicine", "core": True},
+        {"id": "A2", "text": "The ministry closed the clinics", "core": False},
+    ]
+    set_fake_search(fake_search)
+    set_fake(fake_llm)
+    try:
+        result = investigate(state)
+    finally:
+        set_fake(None)
+        set_fake_search(None)
+    queries = result["investigate_stats"]["queries"]
+    assert any("The ministry closed the clinics" in query for query in queries)
+    assert {row["atomic_id"] for row in result["evidence"]} == {"A1"}
+    assert result["evidence"]
+    assert all(row["stance"] == "supports" for row in result["evidence"])
+    block = result["investigate_stats"]["by_atomic"]
+    assert block["A1"]["groups_supporting"] >= 1
+    assert block["A2"]["groups_supporting"] == 0
+    assert block["A2"]["n_neutral"] >= 1
+
+
+def test_a_group_can_support_one_atomic_claim_and_refute_another():
+    from misinfo_agent.investigate import _stats, build_evidence
+
+    quote_a = "The Pink Line opened in Bengaluru on Monday morning"
+    quote_b = "The campus visit was not on the programme"
+    text = f"{quote_a}. {quote_b}. " + " ".join(f"w{i}" for i in range(30))
+    rows = build_evidence(
+        {"claim_date": "2024-06-01"},
+        [
+            {
+                "passage": _stance_passage("P1", "https://www.thehindu.com/a", text, 0.9),
+                "stance": "supports",
+                "quote": quote_a,
+                "reason": "It confirms the opening",
+                "quote_unverified": False,
+                "atomic_id": "A1",
+            },
+            {
+                "passage": _stance_passage("P1", "https://www.thehindu.com/a", text, 0.9),
+                "stance": "refutes",
+                "quote": quote_b,
+                "reason": "It denies the visit",
+                "quote_unverified": False,
+                "atomic_id": "A2",
+            },
+        ],
+    )
+    assert [row["atomic_id"] for row in rows] == ["A1", "A2"]
+    assert all(row["group_conflict"] is False for row in rows)
+    stats = _stats(
+        passages=[],
+        labelled=[
+            {"stance": "supports", "atomic_id": "A1"},
+            {"stance": "refutes", "atomic_id": "A2"},
+        ],
+        evidence=rows,
+        pages=[],
+        searches=0,
+        llm_calls=0,
+        usage=[],
+        unverified=0,
+        notes=[],
+        started=0,
+        queries=[],
+        topup_used=False,
+        topup_queries=[],
+    )
+    assert stats["group_conflicts"] == []
+    assert stats["by_atomic"]["A1"]["groups_supporting"] == 1
+    assert stats["by_atomic"]["A1"]["groups_refuting"] == 0
+    assert stats["by_atomic"]["A2"]["groups_refuting"] == 1
+    assert stats["by_atomic"]["A2"]["groups_supporting"] == 0
+
+
+def test_short_quote_keeps_the_previous_sentence():
+    from misinfo_agent.investigate import build_evidence
+
+    text = (
+        "Health officials said hot lemon water does not kill the virus. "
+        "This is a myth."
+    )
+    passage = _stance_passage("P1", "https://www.bbc.com/a", text)
+    rows = build_evidence(
+        {"claim_date": "2024-01-01"},
+        [{
+            "passage": passage,
+            "stance": "refutes",
+            "quote": "This is a myth.",
+            "reason": "The page denies it",
+            "quote_unverified": False,
+        }],
+    )
+    assert rows[0]["quote"] == "This is a myth."
+    assert rows[0]["display_quote"] == (
+        "Health officials said hot lemon water does not kill the virus. This is a myth."
+    )
+    long_quote = "Health officials said hot lemon water does not kill the virus"
+    long_rows = build_evidence(
+        {"claim_date": "2024-01-01"},
+        [{
+            "passage": passage,
+            "stance": "refutes",
+            "quote": long_quote,
+            "reason": "The page denies it",
+            "quote_unverified": False,
+        }],
+    )
+    assert long_rows[0]["quote"] == long_quote
+    assert long_rows[0]["display_quote"] == long_quote
 
 
 def test_factcheckhub_is_dropped_in_blocked_mode(monkeypatch):
