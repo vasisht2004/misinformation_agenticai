@@ -204,6 +204,12 @@
     "action": null,
     "note": ""
   },
+  "human_action": "",
+  "human_edited": false,
+  "note": "",
+  "errors": [],
+  "result": {},
+  "run_marks": {},
   "explanation": "The Reserve Bank has not said that ₹500 notes printed before 2016 become invalid on 1 December [E1]. Two newsrooms describe the forward as fake [E2] [E3].",
   "true_version": "₹500 notes already in circulation remain legal tender unless the Reserve Bank says otherwise [E1].",
   "correction_message": "This notice is fake. There is no 1 December deadline for ₹500 notes.",
