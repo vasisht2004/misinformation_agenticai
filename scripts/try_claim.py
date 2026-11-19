@@ -3,7 +3,8 @@
 No decision lives here. The positional form is boxes 5, 6, and 7, and
 the claim text is used as the claim. --text, --url, and --image run
 ingest and extract first and print the style signals and the extract
-output, then the same 5, 6, 7 path. Boxes 9, 8+10, 11, and 12 are not called.
+output, then the same 5, 6, 7 path. After box 7 this prints the gate
+(box 9) and the priority (box 11). Boxes 8+10 and 12 are not called.
 
 Usage:
   python scripts/try_claim.py "claim text" --domain Health [--date YYYY-MM-DD]
@@ -28,11 +29,13 @@ if str(ROOT) not in sys.path:
 
 import misinfo_agent.config as config  # noqa: E402
 from misinfo_agent.extract import extract  # noqa: E402
+from misinfo_agent.gate import gate  # noqa: E402
 from misinfo_agent.ingest import ingest  # noqa: E402
 from misinfo_agent.investigate import investigate  # noqa: E402
 from misinfo_agent.llm import LLMQuotaError, calls_today  # noqa: E402
 from misinfo_agent.memory import get_memory  # noqa: E402
 from misinfo_agent.prior_match import decide_prior  # noqa: E402
+from misinfo_agent.priority import priority  # noqa: E402
 from misinfo_agent.search import searches_this_month  # noqa: E402
 
 
@@ -103,6 +106,7 @@ def _run_submitted(args) -> None:
         entities=extracted.get("entities") or {},
         input_type=state.get("input_type") or "",
         raw_text=state.get("raw_text") or "",
+        base=state,
     )
 
 
@@ -116,6 +120,7 @@ def _run_checked(
     entities: dict | None = None,
     input_type: str = "",
     raw_text: str = "",
+    base: dict | None = None,
 ) -> None:
     if not started:
         _print_meters("START")
@@ -159,31 +164,41 @@ def _run_checked(
         print(f"    {sentence}")
 
     # reuse_prior is the pipeline's stop. --investigate is the override
-    # for a person who wants the web table anyway.
+    # for a person who wants the web table anyway. The gate is not
+    # applied on this path: box 6 already accepted an exact fresh prior.
     if decision["route"] == "reuse_prior" and not args.investigate:
         print("  stopping: route is reuse_prior")
-        _finish()
+        _print_meters("END")
         return
 
-    state = {
-        "claim": claim,
-        "domain": domain,
-        "claim_date": claim_date,
-        "match_type": decision["match_type"],
-        "route": decision["route"],
-        "leads": decision["leads"],
-        "needs_recheck": decision["needs_recheck"],
-        "match_reasons": decision["match_reasons"],
-        "match_summary": decision["match_summary"],
-        "atomic_claims": atomic or [],
-        # Verify and official queries are built from these names and figures.
-        # The positional path has none; extract fills them for a submission.
-        "entities": entities or {},
-        # A URL must not come back as its own evidence. Text and image
-        # runs leave input_type empty here, so nothing is excluded.
-        "input_type": input_type,
-        "raw_text": raw_text,
-    }
+    # Start from the submission so priority can see style signals, red
+    # flags, and how many times this forward was stored. The positional
+    # path has none of those; the components then stay at their defaults.
+    state = dict(base or {})
+    state.update(
+        {
+            "claim": claim,
+            "domain": domain,
+            "claim_date": claim_date,
+            "match_type": decision["match_type"],
+            "route": decision["route"],
+            "leads": decision["leads"],
+            "needs_recheck": decision["needs_recheck"],
+            "match_reasons": decision["match_reasons"],
+            "match_summary": decision["match_summary"],
+            "atomic_claims": atomic or state.get("atomic_claims") or [],
+            # Verify and official queries are built from these names and figures.
+            # The positional path has none; extract fills them for a submission.
+            "entities": entities or state.get("entities") or {},
+            # A URL must not come back as its own evidence. A positional
+            # claim leaves input_type empty, so nothing is excluded.
+            "input_type": input_type or state.get("input_type") or "",
+            "raw_text": raw_text or state.get("raw_text") or "",
+            # Box 5 hits. Priority's novelty is 1 minus the top cosine,
+            # and its reach reads also_debunked_by from this same list.
+            "matches": hits,
+        }
+    )
     # Default is to block fact-check sites. The flag is the opt-out.
     config.BLOCK_FACTCHECK_SITES = not args.allow_factcheck
     try:
@@ -240,7 +255,30 @@ def _run_checked(
     # top passages are the ones the stance call actually read.
     if support_all == 0 and refute_all == 0:
         _print_passage_reasons(stats.get("stance_rows") or [])
-    _finish()
+
+    # One investigate call is one finished round. The gate owns the
+    # counter inside the graph; this script is not the graph, so it
+    # records the round that just ran before asking whether to search again.
+    state.update(result)
+    state["rounds"] = 1
+    gated = gate(state)
+    state.update(gated)
+    print("BOX 9  gate")
+    print(f"  gate_decision: {gated.get('gate')}")
+    print(f"  atomic_status: {gated.get('atomic_status')}")
+    print("  reasons:")
+    for sentence in gated.get("gate_reasons") or []:
+        print(f"    {sentence}")
+
+    scored = priority(state)
+    print("BOX 11  priority")
+    print(f"  priority_level: {scored.get('priority')}")
+    print(f"  priority_score: {float(scored.get('priority_score') or 0.0):.3f}")
+    print("  reasons:")
+    for sentence in scored.get("priority_reasons") or []:
+        print(f"    {sentence}")
+    print("Boxes 8+10 and 12 are not called here — no verdict.")
+    _print_meters("END")
 
 
 def _print_passage_reasons(rows: list[dict]) -> None:
@@ -281,18 +319,13 @@ def _groups(evidence: list[dict], stance: str) -> tuple[int, int]:
     return len(all_groups), len(strong)
 
 
-def _finish() -> None:
-    print("Boxes 9, 8+10, 11, 12 not built yet — no verdict.")
-    _print_meters("END")
-
-
 def _print_meters(label: str) -> None:
     print(f"{label}  calls_today={calls_today()}  searches_this_month={searches_this_month()}")
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run boxes 5, 6, and 7 on one claim. Does not produce a verdict."
+        description="Run boxes 5, 6, 7, then the gate and the priority. Does not produce a verdict."
     )
     # Optional so --text / --url / --image can omit it. The positional
     # path still requires it; main() reports that.

@@ -133,7 +133,7 @@ def extract(state: dict) -> dict:
         prompt,
         ExtractResult,
         purpose="extract",
-        prompt_version="extract_v1",
+        prompt_version="extract_v2",
         images=images,
     )
     return _guard(state, parsed)
@@ -317,7 +317,7 @@ def _empty_entities() -> dict:
 
 
 def _prompt(state: dict) -> str:
-    template = (config.PROMPTS_DIR / "extract_v1.txt").read_text(encoding="utf-8")
+    template = (config.PROMPTS_DIR / "extract_v2.txt").read_text(encoding="utf-8")
     return (
         template.replace("__DOMAINS__", " | ".join(config.DOMAINS))
         .replace("__RED_FLAGS__", " | ".join(config.RED_FLAGS))

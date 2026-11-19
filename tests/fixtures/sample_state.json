@@ -157,10 +157,29 @@
   ],
   "rounds": 1,
   "gate": "sufficient",
+  "gate_reasons": [
+    "A1 is refuted: 3 independent groups refute it, and 3 of them are tier 1 or 2.",
+    "The core claim A1 is refuted, so the evidence is enough to assess."
+  ],
+  "atomic_status": {
+    "A1": "refuted"
+  },
   "verdict": "False",
   "confidence": 0.86,
   "priority": "High",
+  "priority_score": 0.6537,
+  "priority_reasons": [
+    "Finance & scams is the harm for this claim (0.90). Call to forward and Fake or vague authority raise it to 1.00, because those flags make the content more dangerous rather than merely louder.",
+    "The closest memory hit has cosine 0.91, so novelty is 0.09.",
+    "Reach is 0.36 from 0 repeat submissions, 1 other debunk, and 1 circulation sighting. It has no WhatsApp forwarded label.",
+    "Urgency is 0.75 from a request to forward it and a near date or a deadline."
+  ],
   "decision": "alert",
+  "decision_reasons": [
+    "The verdict is False, the priority is High, and the confidence 0.86 clears the bar of 0.25.",
+    "This alert pauses for a person to approve it at box 13 before anything is sent."
+  ],
+  "p_star": 0.25,
   "human": {
     "status": "not_required",
     "reviewer": null,

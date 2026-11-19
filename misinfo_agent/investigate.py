@@ -156,11 +156,13 @@ _TOPUP_QUERIES = 2
 # happening now. It can still refute the claim, which is why only a
 # support is cleared. A refute is never rewritten.
 _OLD_EVENT_DAYS = 365
-# v7 is the stance prompt. Older versions stay on disk so a cached check
-# can still be read. v7 keeps every v6 rule and adds the share date,
-# cure/effect refutes, and the campus-versus-station example. A different
-# event (another line, scheme, year, or person) is neutral.
-_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "stance_v7.txt"
+# v8 is the stance prompt. Older versions stay on disk so a cached check
+# can still be read. v8 is v7 plus one rule: a passage that quotes the
+# claim as a myth, rumour, hoax, or something people believe is a refute
+# (or neutral if it gives no verdict), never a support. v7 keeps every v6
+# rule and adds the share date, cure/effect refutes, and the
+# campus-versus-station example.
+_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "stance_v8.txt"
 _TOPUP_PATH = Path(__file__).resolve().parent / "prompts" / "topup_v1.txt"
 _CURRENT_CLAIM = re.compile(
     r"\b(?:now|new|permanently)\b|\bfrom\s+(?:\d{1,2}\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
@@ -484,7 +486,7 @@ def judge_stance(state: dict, passages: list[Passage]) -> StanceBatch | AtomicSt
         prompt,
         schema,
         purpose="stance",
-        prompt_version="stance_v7",
+        prompt_version="stance_v8",
     )
 
 

@@ -1319,7 +1319,9 @@ def test_stance_v7_keeps_v6_and_states_the_share_date():
     assert "Apply every rule above to that atomic claim alone" in prompt
     assert seen["schema"] == "AtomicStanceBatch"
     stance_rows = [row for row in get_usage()[before:] if row.get("purpose") == "stance"]
-    assert stance_rows[-1]["prompt_version"] == "stance_v7"
+    assert stance_rows[-1]["prompt_version"] == "stance_v8"
+    assert "Sucking a lemon or drinking lemon-infused water can kill COVID-19 viral particles" in prompt
+    assert "never a support" in prompt
 
     seen.clear()
     single = {

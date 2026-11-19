@@ -1,0 +1,41 @@
+You are judging whether a passage is evidence for or against one claim.
+You are not writing the verdict. Return only the JSON object the schema asks for.
+
+"supports" ONLY if the passage confirms ALL key details of the claim: who, what, amount, place, AND timing ("now", "from 1 December", "permanently"). If it confirms some details but not others, answer "neutral". If it contradicts any key detail, answer "refutes". A narrower action contradicts "completely" or "permanently": "retail only" against "completely", or "temporary" against "permanent", is a refutation, not a missing detail. Do not answer "neutral" for that.
+
+Old evidence CANNOT support a claim that says "now" or "new" or "from <date>" or "permanently". It CAN refute that claim when it shows the claimed change already happened earlier or on a different date, or ended — that contradicts the claim's timing. Example: claim "₹500 notes printed before 2016 are invalid from 1 December"; passage "RBI withdrew legal tender status of these notes on 8 November 2016" or "India scraps 1,000 rupee notes overnight" -> refutes (timing contradicted). Do not call that "old event". If one sentence says the change already happened and another sentence is only a caption or a "more on this story" link, the contradicting sentence is the stance. Quote that sentence and answer "refutes". If the old page does not contradict the claim, answer "neutral" and the reason must say "old event".
+
+The tense rule and the named-place rule can only stop a passage from supporting. They never turn a refute into neutral. A plan or a statement that contradicts the claim is still a refute. Example: claim "completely withdrawing"; passage "will continue corporate banking" or "ending retail banking only" -> refutes, not neutral.
+
+Tense: use this rule only when the claim says something already happened (visited, inaugurated, was banned, announced). A passage that only says that event is planned, scheduled, expected, or "will" happen does not support the claim. Answer "neutral" and the reason must be "planned, not confirmed". Do not use this rule when the claim is about an ongoing or future action ("is withdrawing", "will be invalid from 1 December"). For those claims, an official plan or announcement is normal evidence and can support or refute under the rules above.
+
+Names inside other names: a place or object named after a person or institution is not that person or institution. "IIM Bangalore metro station" is not IIM Bangalore. "Modi stadium" is not Narendra Modi. That name does not support a claim about the person or institution, so answer "neutral" unless the passage also confirms the claim about that person or institution. This does not turn a contradiction into neutral.
+
+A passage about a different event is neutral, not a refute, even when it names similar things. A different metro line, a different scheme, a different year or edition of some other scheme, or a different person is a different event. The passage is about something else, so it does not show that the claim is false. Example: claim "PM Modi inaugurated the Pink Line of Namma Metro"; passage "PM Modi inaugurated the Yellow Line of Bangalore Metro" -> neutral (different line, different event).
+
+Refute only when the passage says something that cannot be true at the same time as the claim. "The Pink Line opening was postponed", "temporary, not permanent", and "retail only, corporate continues" are refutes, because both cannot be true together. A different date for the same change is not a different event. An older report that the claimed change already happened, or happened on another date, still refutes a claim that says "now", "from <date>", or "permanently". Do not call that a different year, and do not answer "neutral" or "old event" for it. Example: claim "₹500 notes printed before 2016 are invalid from 1 December"; passage "India scraps 1,000 rupee notes overnight" -> refutes (timing contradicted).
+
+Do not use the different-event rule to turn a real contradiction into neutral. Old evidence and planned evidence still cannot support a claim, and they still never turn a refute into neutral.
+
+A passage that only repeats or shares the claim is neutral.
+
+The quote must be the sentence that carries the stance, not a side remark. When a caption sits next to a sentence that contradicts the claim, quote the contradicting sentence. Copy it exactly from the passage, with no added words. Reason is at most 20 words.
+
+Fill "judgements" with one object per passage, using the passage's id. stance is one of "supports", "refutes", "neutral".
+
+A passage that QUOTES or LISTS the claim as a myth, a rumour, a hoax, or something people believe is a REFUTE when the passage gives a verdict, and neutral when it gives no verdict. It is never a support. The listed sentence is the claim being rejected, not evidence for it. Example: a myth-list item "Sucking a lemon or drinking lemon-infused water can kill COVID-19 viral particles" under a myths heading -> refutes.
+
+This claim was shared on __CLAIM_DATE__. Relative times in the claim ('today', 'till Monday', 'from next week') refer to that date. A passage about a different date or a different occasion is NEUTRAL, not a refute. That is a different occasion. It does not replace the rule above: a claim that names a fixed date ("from 1 December") or says "permanently" is still refuted when the passage shows that same change already happened on another date.
+
+A claim that something cures, eliminates, or ends a condition is refuted by a passage that says there is no cure, no evidence for that effect, or only a small or partial effect. "may slightly lower blood sugar" refutes "cures diabetes". Quote that sentence and answer "refutes".
+
+"travelled to the IIMB metro station" does NOT confirm "visited the IIM Bangalore campus". Answer "neutral". A station, a road, or a building that uses the name is not a visit to that place.
+
+CLAIM:
+__CLAIM__
+
+ATOMIC CLAIMS:
+__ATOMIC__
+
+PASSAGES:
+__PASSAGES__

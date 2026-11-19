@@ -264,6 +264,89 @@ def test_veto_failure_downgrades_exact_to_similar():
     )
 
 
+def test_identical_hsbc_claim_stays_exact():
+    # The place is a phrase. Passing it as an entity used to split the
+    # fact-check into Sri / Lanka and call the same sentence a near miss.
+    set_fake(_same_claim)
+    try:
+        decision = decide_prior(
+            "HSBC Bank is completely withdrawing from Sri Lanka",
+            [_hit("HSBC Bank is completely withdrawing from Sri Lanka", 0.96)],
+            now=date(2026, 11, 18),
+            entities={
+                "people": [],
+                "orgs": ["HSBC Bank"],
+                "places": ["Sri Lanka"],
+                "dates": [],
+                "amounts": [],
+            },
+        )
+    finally:
+        clear_fake()
+    assert decision["match_type"] == "exact"
+    assert not any("barely overlap" in reason for reason in decision["match_reasons"])
+
+
+def test_sri_lanka_phrase_still_matches_when_wording_is_not_locked():
+    # Not the same string, and under 0.99, so the wording lock does not
+    # apply. The place is still the same phrase.
+    set_fake(_same_claim)
+    try:
+        decision = decide_prior(
+            "The HSBC Bank is completely withdrawing from Sri Lanka",
+            [_hit("HSBC Bank is completely withdrawing from Sri Lanka", 0.96)],
+            now=date(2026, 11, 18),
+            entities={
+                "people": [],
+                "orgs": ["HSBC Bank"],
+                "places": ["Sri Lanka"],
+                "dates": [],
+                "amounts": [],
+            },
+        )
+    finally:
+        clear_fake()
+    assert decision["match_type"] == "exact"
+    assert not any("barely overlap" in reason for reason in decision["match_reasons"])
+
+
+def test_sri_lanka_versus_india_blocks_exact():
+    set_fake(_same_claim)
+    try:
+        decision = decide_prior(
+            "HSBC Bank is completely withdrawing from Sri Lanka",
+            [_hit("HSBC Bank is completely withdrawing from India", 0.96)],
+            now=date(2026, 11, 18),
+            entities={
+                "people": [],
+                "orgs": ["HSBC Bank"],
+                "places": ["Sri Lanka"],
+                "dates": [],
+                "amounts": [],
+            },
+        )
+    finally:
+        clear_fake()
+    assert decision["match_type"] == "similar"
+    text = " ".join(decision["match_reasons"])
+    assert "Sri Lanka" in text and "India" in text
+
+
+def test_amount_still_downgrades_when_cosine_is_near_one():
+    # The wording lock covers names and key terms only. ₹500 is not ₹2000.
+    set_fake(_same_claim)
+    try:
+        decision = decide_prior(
+            "RBI says all ₹500 notes will be withdrawn.",
+            [_hit("RBI says all ₹2000 notes will be withdrawn.", 0.99)],
+            now=date(2026, 11, 18),
+        )
+    finally:
+        clear_fake()
+    assert decision["match_type"] == "similar"
+    assert any("₹500" in reason and "₹2000" in reason for reason in decision["reasons"])
+
+
 def test_llm_veto_is_skipped_when_disabled(monkeypatch):
     calls = []
     monkeypatch.setattr("misinfo_agent.prior_match.LLM_CONTEXT_CHECK", False)

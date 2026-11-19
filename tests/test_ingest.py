@@ -9,6 +9,7 @@ The message itself is not.
 
 import hashlib
 import io
+import re
 import socket
 import sqlite3
 from datetime import date
@@ -19,7 +20,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 import misinfo_agent.config as config
 import misinfo_agent.fetch as fetch
-from misinfo_agent.ingest import ingest
+from misinfo_agent.ingest import alarm_style, ingest
 
 FIXTURES = Path(__file__).parent / "fixtures"
 _FONT = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
@@ -46,9 +47,12 @@ def test_garlic_forward_signals_and_clean_text(tmp_path):
     assert "hiding" in signals["conspiracy_phrases"]
     assert "confirmed" in signals["certainty_words"]
     assert "cures" in signals["certainty_words"]
-    letters = [ch for ch in GARLIC if ch.isalpha()]
-    assert signals["caps_ratio"] == round(
-        sum(ch.isupper() for ch in letters) / len(letters), 4
+    assert signals["caps_ratio"] == _caps_ratio(GARLIC)
+    # AIIMS is five capitals. Leaving it out is why this is not the
+    # ratio of every letter in the forward.
+    every_letter = [ch for ch in GARLIC if ch.isalpha()]
+    assert signals["caps_ratio"] < round(
+        sum(ch.isupper() for ch in every_letter) / len(every_letter), 4
     )
     assert signals["exclaim_count"] == GARLIC.count("!") + 2 * GARLIC.count("‼")
     assert signals["emoji_count"] == 2
@@ -523,6 +527,28 @@ def test_image_over_the_side_limit_is_rejected():
         ingest(buffer.getvalue(), input_type="image")
 
 
+def _caps_ratio(raw: str) -> float:
+    """The spec: all-caps tokens of 5 letters or fewer are not shouting."""
+    upper = 0
+    total = 0
+    for token in re.findall(r"[A-Za-z]+", raw):
+        if token.isupper() and len(token) <= 5:
+            continue
+        total += len(token)
+        upper += sum(ch.isupper() for ch in token)
+    return round(upper / total, 4) if total else 0.0
+
+
+def test_hsbc_sentence_is_not_alarm_and_garlic_still_is(tmp_path):
+    hsbc = ingest(
+        "HSBC Bank is completely withdrawing from Sri Lanka",
+        db_path=tmp_path / "hsbc.db",
+    )
+    assert alarm_style(hsbc["style_signals"]) is False
+    garlic = ingest(GARLIC, db_path=tmp_path / "garlic.db")
+    assert alarm_style(garlic["style_signals"]) is True
+
+
 def test_image_over_ten_megabytes_is_rejected():
     payload = b"\x89PNG" + b"x" * (10 * 1024 * 1024)
     with pytest.raises(ValueError, match="10 MB"):
@@ -547,7 +573,9 @@ def test_sample_rbi_forward_matches_the_fixture_hash(tmp_path):
     )
     assert out["style_signals"]["share_request"] is True
     assert out["style_signals"]["authority_mentions"] == ["RBI"]
-    assert out["style_signals"]["caps_ratio"] == 0.0602
+    # RBI is three capitals. The old ratio, 0.0602, counted them.
+    assert out["style_signals"]["caps_ratio"] == _caps_ratio(raw)
+    assert out["style_signals"]["caps_ratio"] < 0.0602
     assert out["submission_hash"] == (
         "c9c4b414c2739182479b83b46a5fff47007d8393071d10ecf8b421aee70d6d98"
     )

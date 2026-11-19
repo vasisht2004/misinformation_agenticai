@@ -179,10 +179,23 @@ class ClaimState(TypedDict, total=False):
     # passages split, independent groups on each side, circulation
     # sightings, seconds, and a note when a cap stopped the round short.
     investigate_stats: dict
-    # Box 9. How many investigate rounds have run. The gate stops at 2.
+    # Box 9. How many investigate rounds have already finished. The gate
+    # and box 12 stop at config.MAX_SEARCH_ROUNDS. A search_more return
+    # is the only write that advances this.
     rounds: int
-    # Box 9. "sufficient", "insufficient", "conflicting" or "search_more".
+    # Box 9. "sufficient", "insufficient", "conflicting", "search_more",
+    # "error", or "skipped". error is a stance failure after the search
+    # budget, never a lack of sources. skipped means box 6 reused an
+    # exact fresh prior, or the submission is not checkable, so this
+    # table was not judged. This is the gate_decision.
     gate: str
+    # Box 9. Plain sentences for the card: one line per atomic claim,
+    # then why the overall gate is what it is. A shout is not in here.
+    gate_reasons: list
+    # Box 9. Atomic-claim id -> status. not_checkable, conflicting,
+    # refuted, supported, or insufficient. The overall gate follows
+    # the core claim only.
+    atomic_status: dict
 
     # Box 8+10. False / Misleading / True / Unverifiable / Other.
     # Computed from evidence by rule, not taken from the model's self-report.
@@ -193,10 +206,24 @@ class ClaimState(TypedDict, total=False):
     # correction. Box 14–15 displays this; it does not rewrite it.
     explanation: str
 
-    # Box 11. "High", "Medium" or "Low".
+    # Box 11. "High", "Medium" or "Low". This is the priority_level.
+    # The score that produced it is priority_score. Style signals can
+    # move this. They cannot move the verdict.
     priority: str
-    # Box 12. "alert", "unsure" (human), "search_more" or "store".
+    # Box 11. Weighted harm, novelty, reach and urgency, in [0, 1].
+    priority_score: float
+    # Box 11. One plain sentence per component, in that order.
+    priority_reasons: list
+    # Box 12. "alert", "human", "search_more" or "store".
+    # human is the pause. Box 13 records what the person did.
+    # An alert still pauses there while ALERT_NEEDS_APPROVAL is on;
+    # the decision stays "alert" so the card can say what was asked.
     decision: str
+    # Box 12. Why `decision` was chosen. An alert says box 13 must
+    # approve it before anything is sent.
+    decision_reasons: list
+    # Box 12. The confidence bar, a / (a + bH). Higher harm, lower bar.
+    p_star: float
     # Box 13. Reviewer action once a paused run resumes. Empty until then.
     human: dict
 
