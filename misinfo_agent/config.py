@@ -31,11 +31,11 @@ SUBMISSIONS_DB = DATA_DIR / "submissions.db"
 # Tests point this at a temporary directory. data/ is gitignored.
 UPLOADS_DIR = DATA_DIR / "uploads"
 
-# On when a person submits a forward. The evaluation sets it False.
-# Scoring an article is not that article being forwarded again, and
-# box 11's reach reads submission_count. A measured claim must not
-# look like a crowd.
-RECORD_SUBMISSIONS = True
+# Off unless a real submission turns it on. scripts/try_claim.py does
+# that with --record. Scoring a claim, and a demo of the pipeline, are
+# not another person forwarding it. Box 11's reach reads
+# submission_count, so a test run must not look like a crowd.
+RECORD_SUBMISSIONS = False
 
 # Read-only inputs. See DATA.md. Never load the `content` column.
 CLASSIFIED_PATH = RAW_DIR / "classified_v2.parquet"
@@ -375,6 +375,20 @@ PASSAGE_MIN_COS = 0.45
 # Off in the demo. The eval turns it on so a page published after the claim
 # cannot count as evidence the system could have had at the time.
 EVAL_DROP_AFTER_CLAIM = False
+
+# A relative-time claim ("today", "till Monday") is about this fortnight.
+# Investigate forces a trusted page dated more than this many days before
+# the claim, or any trusted page dated after the claim, to neutral: that
+# page is a different occasion. A dated status claim ("invalid from 1
+# December", "banned from 2026") is not in this window, so an old page
+# can still refute it. Unknown dates are kept and flagged.
+RELATIVE_TIME_WINDOW_DAYS = 14
+
+# Stance is frozen at stance_v9 (misinfo_agent/prompts/stance_v9.txt,
+# prompt_version "stance_v9" in investigate.judge_stance). A change to
+# that prompt, or to the code that rewrites a stance label, needs a full
+# regression on the hand-labelled rows in data/eval/day3_evidence.csv
+# before it becomes the default. Do not ship a new version off one live claim.
 
 # "keep" leaves a passage whose date we never found. "drop" removes it,
 # and only while the leakage guard is on: a demo with no claim date would
@@ -746,3 +760,36 @@ P_STAR_MARGIN = 0.15
 # Every alert waits at box 13. The decision string stays "alert" so the
 # card can say what was requested; the pause is this flag, not a rename.
 ALERT_NEEDS_APPROVAL = True
+
+# Box 10. Provisional. The eval reports calibration (ECE) and is what
+# should move these numbers. They are log-odds, not percentages: the
+# assess box squashes the weighted sum with a logistic into [0, 1].
+# groups is the largest positive term because two credible outlets are
+# the product's own bar and four is already a pile. agreement is next
+# so a named dissenter actually moves the score. A top-up, a second
+# search round, and unverified quotes pull it down: each one means the
+# table was thinner than the first pass wanted.
+CONFIDENCE_BIAS = -0.4
+CONFIDENCE_WEIGHTS = {
+    "groups": 1.8,
+    "tier": 0.8,
+    "agreement": 1.2,
+    "dated": 0.4,
+    "unverified": -0.8,
+    "topup": -0.4,
+    "rounds": -0.3,
+}
+# Confidence that the claim is unverifiable, not that it is false.
+# rounds and thin raise it: we used the search and we are still short
+# of two credible groups. A failed quote check lowers it.
+CONFIDENCE_UNVERIFIABLE_BIAS = 0.0
+CONFIDENCE_UNVERIFIABLE_WEIGHTS = {
+    "rounds": 1.1,
+    "thin": 1.3,
+    "topup": 0.3,
+    "unverified": -0.7,
+}
+# reuse_prior has no new table. The cosine is the match strength.
+# 0.85 (the exact threshold) lands lower than a near-copy at 0.96.
+CONFIDENCE_REUSE_BIAS = -2.2
+CONFIDENCE_REUSE_COSINE = 4.0

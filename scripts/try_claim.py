@@ -1,16 +1,19 @@
-"""Run one claim through the boxes that exist and print what they returned.
+"""Run one claim through the decision path and print what each box returned.
 
-No decision lives here. The positional form is boxes 5, 6, and 7, and
-the claim text is used as the claim. --text, --url, and --image run
-ingest and extract first and print the style signals and the extract
-output, then the same 5, 6, 7 path. After box 7 this prints the gate
-(box 9) and the priority (box 11). Boxes 8+10 and 12 are not called.
+The positional form starts at box 5. --text, --url, and --image run
+ingest and extract first. After a prior that is not an exact fresh
+match, the path is box 7 then box 9, and box 7 again while the gate
+says search_more and the round budget allows it. Then box 8+10, box 11,
+and box 12. An exact fresh prior skips the web and the assess model.
+
+Submissions are not recorded unless --record is passed. A test of this
+script must not add a row that box 11 later reads as reach.
 
 Usage:
   python scripts/try_claim.py "claim text" --domain Health [--date YYYY-MM-DD]
-      [--allow-factcheck] [--investigate]
+      [--allow-factcheck] [--investigate] [--record]
   python scripts/try_claim.py --text "..." [--date YYYY-MM-DD]
-  python scripts/try_claim.py --url https://... 
+  python scripts/try_claim.py --url https://...
   python scripts/try_claim.py --image path [--caption "..."]
 """
 
@@ -28,6 +31,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import misinfo_agent.config as config  # noqa: E402
+from misinfo_agent.assess import assess  # noqa: E402
+from misinfo_agent.decide import decide  # noqa: E402
 from misinfo_agent.extract import extract  # noqa: E402
 from misinfo_agent.gate import gate  # noqa: E402
 from misinfo_agent.ingest import ingest  # noqa: E402
@@ -41,6 +46,9 @@ from misinfo_agent.search import searches_this_month  # noqa: E402
 
 def main(argv: list[str] | None = None) -> None:
     args = _parser().parse_args(argv)
+    # Off unless this process is a real forward. Scoring the garlic text
+    # must not become another submission that a later reach score counts.
+    config.RECORD_SUBMISSIONS = bool(args.record)
     chosen = [bool(args.text), bool(args.url), bool(args.image)]
     if any(chosen):
         if sum(chosen) != 1 or args.claim:
@@ -163,18 +171,54 @@ def _run_checked(
     for sentence in decision.get("match_summary") or []:
         print(f"    {sentence}")
 
-    # reuse_prior is the pipeline's stop. --investigate is the override
-    # for a person who wants the web table anyway. The gate is not
-    # applied on this path: box 6 already accepted an exact fresh prior.
-    if decision["route"] == "reuse_prior" and not args.investigate:
-        print("  stopping: route is reuse_prior")
-        _print_meters("END")
-        return
-
     # Start from the submission so priority can see style signals, red
     # flags, and how many times this forward was stored. The positional
     # path has none of those; the components then stay at their defaults.
+    state = _claim_state(
+        base,
+        claim=claim,
+        domain=domain,
+        claim_date=claim_date,
+        decision=decision,
+        hits=hits,
+        atomic=atomic,
+        entities=entities,
+        input_type=input_type,
+        raw_text=raw_text,
+    )
+    # An exact fresh prior is the pipeline's stop for the web. Assess
+    # copies the archive row and does not call the model. --investigate
+    # is the override for a person who wants the web table anyway.
+    if decision["route"] == "reuse_prior" and not args.investigate:
+        print("  stopping the web search: route is reuse_prior")
+        _finish(state)
+        return
+    if args.investigate and state.get("route") == "reuse_prior":
+        # Leaving the route as reuse_prior would make assess ignore the
+        # pages this flag just asked us to read.
+        state["route"] = "investigate"
+
+    # Default is to block fact-check sites. The flag is the opt-out.
+    config.BLOCK_FACTCHECK_SITES = not args.allow_factcheck
+    _search_until_gate(state)
+    _finish(state)
+
+
+def _claim_state(
+    base,
+    *,
+    claim,
+    domain,
+    claim_date,
+    decision,
+    hits,
+    atomic,
+    entities,
+    input_type,
+    raw_text,
+) -> dict:
     state = dict(base or {})
+    best = decision.get("best_match") or {}
     state.update(
         {
             "claim": claim,
@@ -197,10 +241,31 @@ def _run_checked(
             # Box 5 hits. Priority's novelty is 1 minus the top cosine,
             # and its reach reads also_debunked_by from this same list.
             "matches": hits,
+            # The one hit box 6 judged closest. Assess copies it on
+            # reuse_prior and shows it to the draft on a similar match.
+            "best_match": best if isinstance(best, dict) else {},
         }
     )
-    # Default is to block fact-check sites. The flag is the opt-out.
-    config.BLOCK_FACTCHECK_SITES = not args.allow_factcheck
+    return state
+
+
+def _search_until_gate(state: dict) -> None:
+    """Box 7, then box 9, and box 7 again while the gate asks for more.
+
+    The gate returns search_more only when another round is still inside
+    the budget, and it has already written that next round into `rounds`.
+    Stopping on `rounds < MAX` would skip the round the gate just authorised,
+    because the counter is already at the cap of the approval. The hop
+    cap is only so a gate bug cannot search forever.
+    """
+    _one_search(state)
+    hops = 0
+    while state.get("gate") == "search_more" and hops < config.MAX_SEARCH_ROUNDS:
+        hops += 1
+        _one_search(state)
+
+
+def _one_search(state: dict) -> None:
     try:
         result = investigate(state)
     except LLMQuotaError as exc:
@@ -208,26 +273,102 @@ def _run_checked(
         print(f"BOX 7  stopped: {exc}")
         _print_meters("END")
         raise SystemExit(2) from exc
-    stats = result["investigate_stats"]
-    evidence = result["evidence"]
-    print("BOX 7  investigate")
+    fresh = _absorb(state, result)
+    print(f"BOX 7  investigate (round {state.get('rounds')})")
+    _print_investigate(result.get("investigate_stats") or {}, fresh, state.get("evidence") or [])
+    gated = gate(state)
+    state.update(gated)
+    _print_gate(state)
+
+
+def _absorb(state: dict, result: dict) -> list:
+    """Keep every round's rows. investigate() returns only the new ones.
+
+    The graph would append them with the evidence reducer. This script
+    is not the graph, so replacing the list would make round 2's gate
+    judge only the pages that round found.
+    """
+    prior_evidence = list(state.get("evidence") or [])
+    prior_passages = list(state.get("passages") or [])
+    fresh = list(result.get("evidence") or [])
+    old_stats = state.get("investigate_stats") if isinstance(state.get("investigate_stats"), dict) else {}
+    state.update(result)
+    state["evidence"] = prior_evidence + fresh
+    state["passages"] = prior_passages + list(result.get("passages") or [])
+    state["investigate_stats"] = _merge_stats(old_stats, result.get("investigate_stats") or {})
+    # The gate is what advances the counter. Before the first gate, one
+    # finished investigate is round 1. A later round leaves the number
+    # the previous gate already wrote, so this does not reset it to 1
+    # and accidentally authorise a third search.
+    if int(state.get("rounds") or 0) < 1:
+        state["rounds"] = 1
+    return fresh
+
+
+def _merge_stats(old: dict, new: dict) -> dict:
+    """Keep this round's report, and add the counts a later box still needs.
+
+    quote_unverified is how many quotes we could not check. Round 2's
+    dict replaces round 1's, so the first round's count has to be added
+    back or confidence would forget them. A stance failure in either
+    round stays a failure: a later success does not make the missing
+    labels trustworthy.
+    """
+    if not old:
+        return dict(new)
+    merged = dict(new)
+    merged["quote_unverified"] = int(old.get("quote_unverified") or 0) + int(new.get("quote_unverified") or 0)
+    merged["topup_used"] = bool(old.get("topup_used")) or bool(new.get("topup_used"))
+    merged["stance_failed"] = bool(old.get("stance_failed")) or bool(new.get("stance_failed"))
+    return merged
+
+
+def _finish(state: dict) -> None:
+    """Box 8+10, then priority, then the decision. Quota stops the run."""
+    if "gate" not in state:
+        # reuse_prior never searched. The gate records that it was skipped
+        # so box 12 does not treat a missing gate as a conflict.
+        gated = gate(state)
+        state.update(gated)
+        _print_gate(state)
+    try:
+        judged = assess(state)
+    except LLMQuotaError as exc:
+        print(f"BOX 8+10  stopped: {exc}")
+        _print_meters("END")
+        raise SystemExit(2) from exc
+    state.update(judged)
+    _print_assess(state)
+    scored = priority(state)
+    state.update(scored)
+    _print_priority(state)
+    decided = decide(state)
+    state.update(decided)
+    _print_decide(state)
+    _print_meters("END")
+
+
+def _print_investigate(stats: dict, fresh: list, full: list) -> None:
     print("  queries:")
     for query in stats.get("queries") or []:
         print(f"    {query}")
-    if not evidence:
-        print("  evidence: none")
-    for row in evidence:
+    if not fresh:
+        print("  new evidence: none")
+    for row in fresh:
         # display_quote adds the previous sentence when the model's quote
         # is only a few words. The quote field itself is unchanged.
         shown = " ".join(str(row.get("display_quote") or row.get("quote") or "").split())
         print(
-            f"  {row['id']}  atomic={row.get('atomic_id') or 'A1'}  "
-            f"{row.get('netloc') or '-'}  tier={row['tier']}  "
-            f"group={row['group_id']}  {row['stance']}  date={row.get('published_date') or '-'}"
+            f"  {row.get('id')}  atomic={row.get('atomic_id') or 'A1'}  "
+            f"{row.get('netloc') or '-'}  tier={row.get('tier')}  "
+            f"group={row.get('group_id')}  {row.get('stance')}  date={row.get('published_date') or '-'}"
+            f"{('  repaired_from=' + row['repaired_from']) if row.get('repaired_from') else ''}"
         )
         print(f"     {shown}")
-    support_all, support_strong = _groups(evidence, "supports")
-    refute_all, refute_strong = _groups(evidence, "refutes")
+    # Group counts are the whole table, not this round. Round 2's new
+    # rows alone would look thinner than the evidence the gate judged.
+    support_all, support_strong = _groups(full, "supports")
+    refute_all, refute_strong = _groups(full, "refutes")
     print(f"  groups supporting: {support_all} (tier<=2: {support_strong})")
     print(f"  groups refuting: {refute_all} (tier<=2: {refute_strong})")
     by_atomic = stats.get("by_atomic") or {}
@@ -241,6 +382,10 @@ def _run_checked(
                 f"neutral={block.get('n_neutral')}"
             )
     print(f"  neutral: {stats.get('n_neutral')}")
+    # Mismatch is what the repair did not change. repaired is how many
+    # neutrals that pass moved. The date window can still clear one after.
+    print(f"  reason_label_mismatch: {stats.get('reason_label_mismatch', 0)}")
+    print(f"  repaired: {stats.get('repaired', 0)}")
     print(f"  stance_failed: {stats.get('stance_failed')}")
     print(f"  top-up used: {stats.get('topup_used')}")
     if stats.get("topup_queries"):
@@ -251,18 +396,13 @@ def _run_checked(
     )
     if stats.get("notes"):
         print(f"  notes: {stats['notes']}")
-    # An empty refute list is the case where the reasons matter. The
-    # top passages are the ones the stance call actually read.
+    # An empty table is the case where the reasons matter. The top
+    # passages are the ones the stance call actually read.
     if support_all == 0 and refute_all == 0:
         _print_passage_reasons(stats.get("stance_rows") or [])
 
-    # One investigate call is one finished round. The gate owns the
-    # counter inside the graph; this script is not the graph, so it
-    # records the round that just ran before asking whether to search again.
-    state.update(result)
-    state["rounds"] = 1
-    gated = gate(state)
-    state.update(gated)
+
+def _print_gate(gated: dict) -> None:
     print("BOX 9  gate")
     print(f"  gate_decision: {gated.get('gate')}")
     print(f"  atomic_status: {gated.get('atomic_status')}")
@@ -270,15 +410,62 @@ def _run_checked(
     for sentence in gated.get("gate_reasons") or []:
         print(f"    {sentence}")
 
-    scored = priority(state)
+
+def _print_assess(state: dict) -> None:
+    print("BOX 8+10  assess")
+    print(f"  verdict: {state.get('verdict')}")
+    print(f"  confidence: {float(state.get('confidence') or 0.0):.4f}")
+    print(f"  needs_human: {state.get('needs_human')}")
+    caveats = state.get("caveats") or []
+    if caveats:
+        print("  caveats:")
+        for item in caveats:
+            print(f"    {item}")
+    else:
+        print("  caveats: none")
+    for item in state.get("atomic_results") or []:
+        cites = ", ".join(item.get("citations") or []) or "none"
+        print(f"  {item.get('atomic_id')}  refute_kind={item.get('refute_kind')}")
+        print(f"    explanation: {item.get('explanation') or ''}")
+        print(f"    citations: {cites}")
+    print(f"  true_version: {state.get('true_version') or ''}")
+    print(f"  correction_message: {state.get('correction_message') or ''}")
+    print(f"  what_we_found: {state.get('what_we_found') or ''}")
+    print(f"  citations: {', '.join(state.get('citations') or []) or 'none'}")
+    _print_archive_citation(state)
+    notes = state.get("assess_notes") or []
+    if notes:
+        print("  assess_notes:")
+        for note in notes:
+            print(f"    {note}")
+
+
+def _print_archive_citation(state: dict) -> None:
+    """C1 is the archive fact-check reused as the source, not an evidence row."""
+    if "C1" not in (state.get("citations") or []):
+        return
+    best = state.get("best_match") if isinstance(state.get("best_match"), dict) else {}
+    print(
+        f"  C1  {best.get('site') or '-'}  {best.get('date') or '-'}  {best.get('url') or '-'}"
+    )
+
+
+def _print_priority(state: dict) -> None:
     print("BOX 11  priority")
-    print(f"  priority_level: {scored.get('priority')}")
-    print(f"  priority_score: {float(scored.get('priority_score') or 0.0):.3f}")
+    print(f"  priority_level: {state.get('priority')}")
+    print(f"  priority_score: {float(state.get('priority_score') or 0.0):.3f}")
     print("  reasons:")
-    for sentence in scored.get("priority_reasons") or []:
+    for sentence in state.get("priority_reasons") or []:
         print(f"    {sentence}")
-    print("Boxes 8+10 and 12 are not called here — no verdict.")
-    _print_meters("END")
+
+
+def _print_decide(state: dict) -> None:
+    print("BOX 12  decide")
+    print(f"  decision: {state.get('decision')}")
+    print(f"  p_star: {float(state.get('p_star') or 0.0):.4f}")
+    print("  reasons:")
+    for sentence in state.get("decision_reasons") or []:
+        print(f"    {sentence}")
 
 
 def _print_passage_reasons(rows: list[dict]) -> None:
@@ -296,9 +483,16 @@ def _print_passage_reasons(rows: list[dict]) -> None:
     for row in rows:
         if str(row.get("passage_id") or "") not in chosen:
             continue
+        marks = ""
+        if row.get("date_unknown"):
+            marks += "  date_unknown"
+        if row.get("reason_label_mismatch"):
+            marks += "  reason_label_mismatch"
+        if row.get("repaired_from"):
+            marks += f"  repaired_from={row.get('repaired_from')}"
         print(
             f"    {row.get('passage_id')}  atomic={row.get('atomic_id') or 'A1'}  "
-            f"{row.get('netloc') or '-'}  {row.get('stance')}: {row.get('reason') or ''}"
+            f"{row.get('netloc') or '-'}  {row.get('stance')}: {row.get('reason') or ''}{marks}"
         )
         shown += 1
     if shown == 0:
@@ -325,7 +519,7 @@ def _print_meters(label: str) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run boxes 5, 6, 7, then the gate and the priority. Does not produce a verdict."
+        description="Run the decision path: 5, 6, then 7 and 9 until the gate settles, then 8+10, 11, and 12."
     )
     # Optional so --text / --url / --image can omit it. The positional
     # path still requires it; main() reports that.
@@ -354,6 +548,11 @@ def _parser() -> argparse.ArgumentParser:
         "--investigate",
         action="store_true",
         help="run box 7 even when box 6 would reuse the prior",
+    )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="store this submission in data/submissions.db (off by default, so a test does not inflate reach)",
     )
     return parser
 

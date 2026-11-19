@@ -91,6 +91,24 @@
       ]
     }
   ],
+  "best_match": {
+    "article_id": "fc-rbi-500-2016",
+    "site": "Alt News",
+    "date": "2016-11-15",
+    "primary_claim": "RBI will discontinue ₹500 notes printed before 2016 from December.",
+    "true_version": "RBI had announced no such deadline for ₹500 notes.",
+    "verdict": "False",
+    "verdict_norm": "false",
+    "url": "https://www.altnews.in/example-rbi-500-notes-invalid",
+    "domain": "Finance & scams",
+    "dense_cos": 0.91,
+    "also_debunked_by": [
+      {
+        "site": "BOOM",
+        "url": "https://www.boomlive.in/example-rbi-500-notes"
+      }
+    ]
+  },
   "match_type": "similar",
   "route": "investigate",
   "leads": [
@@ -165,7 +183,7 @@
     "A1": "refuted"
   },
   "verdict": "False",
-  "confidence": 0.86,
+  "confidence": 0.9608,
   "priority": "High",
   "priority_score": 0.6537,
   "priority_reasons": [
@@ -176,7 +194,7 @@
   ],
   "decision": "alert",
   "decision_reasons": [
-    "The verdict is False, the priority is High, and the confidence 0.86 clears the bar of 0.25.",
+    "The verdict is False, the priority is High, and the confidence 0.9608 clears the bar of 0.25.",
     "This alert pauses for a person to approve it at box 13 before anything is sent."
   ],
   "p_star": 0.25,
@@ -186,7 +204,22 @@
     "action": null,
     "note": ""
   },
-  "explanation": "The Reserve Bank has not said that ₹500 notes printed before 2016 become invalid on 1 December. RBI's own notice page and two independent newsrooms describe the WhatsApp forward as fake. What is true: ₹500 notes already in circulation remain legal tender unless RBI says otherwise. Correction you can forward: this RBI notice is fake; there is no 1 December deadline for ₹500 notes.",
+  "explanation": "The Reserve Bank has not said that ₹500 notes printed before 2016 become invalid on 1 December [E1]. Two newsrooms describe the forward as fake [E2] [E3].",
+  "true_version": "₹500 notes already in circulation remain legal tender unless the Reserve Bank says otherwise [E1].",
+  "correction_message": "This notice is fake. There is no 1 December deadline for ₹500 notes.",
+  "what_we_found": "",
+  "caveats": [],
+  "citations": ["E1", "E2", "E3"],
+  "atomic_results": [
+    {
+      "atomic_id": "A1",
+      "explanation": "The Reserve Bank has not said that ₹500 notes printed before 2016 become invalid on 1 December [E1]. Two newsrooms describe the forward as fake [E2] [E3].",
+      "refute_kind": "entirely_false",
+      "citations": ["E1", "E2", "E3"]
+    }
+  ],
+  "assess_notes": [],
+  "needs_human": false,
   "audit": {
     "run_id": "demo-rbi-500",
     "model": "gemini",

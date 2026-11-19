@@ -25,6 +25,17 @@ from misinfo_agent.ingest import alarm_style, ingest
 FIXTURES = Path(__file__).parent / "fixtures"
 _FONT = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
 
+@pytest.fixture(autouse=True)
+def _record_in_these_tests(monkeypatch, request):
+    """The product default is off so a demo does not inflate reach.
+
+    These tests are about the counter itself, so they turn recording on.
+    The test of the off switch sets the flag itself, after this fixture.
+    """
+    if request.node.name != "test_record_submissions_false_writes_nothing":
+        monkeypatch.setattr(config, "RECORD_SUBMISSIONS", True)
+
+
 GARLIC = (
     "‼️BREAKING‼️ Forwarded as received — AIIMS Delhi doctors have CONFIRMED "
     "that drinking 2 spoons of raw garlic juice every morning cures Type 2 "
