@@ -215,6 +215,10 @@ def decide_prior(
         # Concrete clashes (the date, the amount) go on the card ahead of
         # the bag of leftover words. The card keeps the first two sentences.
         matched = str(best.get("primary_claim") or "")
+        # Identical wording, or a cosine this close, is the same sentence
+        # with a name-tagger glitch, not a different claim. Names and key
+        # terms must not talk it down. A different date or amount still can.
+        wording_lock = _same_claim_text(claim, matched) or cosine >= 0.99
         notes.extend(
             _detail_notes(
                 claim,
@@ -222,15 +226,16 @@ def decide_prior(
                 entities,
                 contradiction=new_rules,
                 normalise=new_rules,
+                check_names=not wording_lock,
             )
         )
         if new_rules:
             community = _community_note(claim, matched)
             if community:
                 notes.append(community)
-            subject = _paired_term_note(claim, matched, sim_floor)
+            subject = None if wording_lock else _paired_term_note(claim, matched, sim_floor)
         else:
-            subject = _subject_note(claim, matched)
+            subject = None if wording_lock else _subject_note(claim, matched)
         if subject:
             notes.append(subject)
     # Only an exact candidate can be downgraded by a detail. A merely
@@ -360,6 +365,28 @@ def _source(best: dict) -> str:
     return "a fact-check"
 
 
+def _same_claim_text(left: str, right: str) -> bool:
+    """True when the two claims are the same words, ignoring case and punctuation.
+
+    "Sri Lanka." and "sri lanka" are one sentence. A name rule that fires
+    on that pair is a parser mistake, which is why the caller can lock
+    names and key terms off. Dates and amounts are read from the original
+    string, so this fold does not hide a ₹500 / ₹2000 clash.
+    """
+    folded = _fold_claim(left)
+    return bool(folded) and folded == _fold_claim(right)
+
+
+def _fold_claim(text: str) -> str:
+    chars = []
+    for ch in (text or "").casefold():
+        if ch.isalnum() or ch.isspace():
+            chars.append(ch)
+        else:
+            chars.append(" ")
+    return " ".join("".join(chars).split())
+
+
 def _detail_notes(
     claim: str,
     matched: str,
@@ -367,6 +394,7 @@ def _detail_notes(
     *,
     contradiction: bool = True,
     normalise: bool = True,
+    check_names: bool = True,
 ) -> list[str]:
     """Dates, amounts, years, numbers, and rough names.
 
@@ -415,9 +443,10 @@ def _detail_notes(
     )
     if number:
         notes.append(number)
-    names = _name_clash(claim_bits["names"], match_bits["names"])
-    if names:
-        notes.append(names)
+    if check_names:
+        names = _name_clash(claim_bits["names"], match_bits["names"], claim, matched)
+        if names:
+            notes.append(names)
     return notes
 
 
@@ -623,20 +652,11 @@ def _parse_details(text: str, *, normalise: bool = True) -> dict:
         if digits in years:
             continue
         numbers.add(digits)
+    # Phrases, not tokens. "Sri Lanka" is one place. Splitting it into
+    # "Sri" and "Lanka" made that place miss itself in the fact-check.
     names = {}
-    # The first word of a sentence is capitalised because it is first, not
-    # because it is a name. "Drinking hot water…" versus "Inhaling hot
-    # water…" would otherwise look like a place clash. An acronym (RBI, WHO)
-    # still counts at the start: the capitals are the name, not the sentence.
-    raw = text or ""
-    origin = len(raw) - len(raw.lstrip())
-    for match in _CAPITAL.finditer(raw):
-        word = match.group(0)
-        if word.casefold() in _NOT_A_NAME:
-            continue
-        if match.start() == origin and not word.isupper():
-            continue
-        names.setdefault(word.casefold(), word)
+    for phrase in _capital_phrases(text or ""):
+        names.setdefault(phrase.casefold(), phrase)
     return {
         "amounts": amounts,
         "years": years,
@@ -691,12 +711,16 @@ def _prefer_entities(parsed: dict, entities: dict) -> dict:
             parsed, _rest = _extract_dates(str(item))
             found.extend(parsed)
         updated["dates"] = found
-    if "names" in entities or "places" in entities:
+    # People, orgs and places are already phrases. "Sri Lanka" and
+    # "HSBC Bank" stay whole. Splitting them into tokens is what made
+    # the place miss the same place in the fact-check.
+    if any(key in entities for key in ("names", "people", "orgs", "places")):
         names = {}
-        for word in list(entities.get("names") or []) + list(entities.get("places") or []):
-            text = str(word).strip()
-            if text:
-                names.setdefault(text.casefold(), text)
+        for key in ("names", "people", "orgs", "places"):
+            for word in entities.get(key) or []:
+                text = " ".join(str(word).split())
+                if text:
+                    names.setdefault(text.casefold(), text)
         updated["names"] = names
     return updated
 
@@ -749,19 +773,72 @@ def _sample(have: set[str], other: set[str]) -> str:
     return sorted(have, key=Decimal)[0]
 
 
-def _name_clash(left: dict, right: dict) -> str | None:
+def _capital_phrases(text: str) -> list[str]:
+    """Consecutive capitalised words as one name.
+
+    "Sri Lanka" is a place. "HSBC Bank" is an organisation. Reading each
+    word alone made "Sri Lanka" fail to match "Sri Lanka", because the
+    fact-check side was the tokens Sri and Lanka and the claim side was
+    the phrase. A month, or the first word of the sentence, is still not
+    a name. An all-caps acronym at the start still is.
+    """
+    raw = text or ""
+    if not raw:
+        return []
+    origin = len(raw) - len(raw.lstrip())
+    phrases: list[str] = []
+    bucket: list[str] = []
+    previous_end = None
+
+    def flush() -> None:
+        if bucket:
+            phrases.append(" ".join(bucket))
+            bucket.clear()
+
+    for match in _CAPITAL.finditer(raw):
+        word = match.group(0)
+        if word.casefold() in _NOT_A_NAME:
+            flush()
+            previous_end = None
+            continue
+        if match.start() == origin and not word.isupper():
+            flush()
+            previous_end = None
+            continue
+        adjacent = previous_end is not None and raw[previous_end:match.start()].strip() == ""
+        if not adjacent:
+            flush()
+        bucket.append(word)
+        previous_end = match.end()
+    flush()
+    return phrases
+
+
+def _phrase_occurs(phrase: str, text: str) -> bool:
+    """The whole phrase, case-insensitive, not a piece of a longer word."""
+    key = " ".join(str(phrase).casefold().split())
+    if not key:
+        return False
+    hay = " ".join(str(text).casefold().split())
+    return re.search(rf"(?<!\w){re.escape(key)}(?!\w)", hay) is not None
+
+
+def _name_clash(left: dict, right: dict, claim: str = "", matched: str = "") -> str | None:
     # One side with no proper noun is not a clash. "Notes are invalid" and
     # "RBI says notes are invalid" are the same claim with an added name.
-    # Jaccard 0 for empty-against-something would downgrade that pair.
+    # A phrase matches when the other sentence contains it whole, so
+    # "Sri Lanka" matches "Sri Lanka" and does not match "India".
+    # Overlap of some other name (HSBC Bank on both sides) does not
+    # excuse a place that was swapped.
     if not left or not right:
         return None
-    shared = set(left) & set(right)
-    union = set(left) | set(right)
-    if len(shared) / len(union) >= 0.2:
+    left_only = [phrase for phrase in left.values() if not _phrase_occurs(phrase, matched)]
+    right_only = [phrase for phrase in right.values() if not _phrase_occurs(phrase, claim)]
+    if not left_only or not right_only:
         return None
     return (
         "The names and places barely overlap: "
-        f"{_quoted(list(left.values()))} vs {_quoted(list(right.values()))}."
+        f"{_quoted(left_only)} vs {_quoted(right_only)}."
     )
 
 

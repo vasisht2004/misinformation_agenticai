@@ -1319,7 +1319,9 @@ def test_stance_v7_keeps_v6_and_states_the_share_date():
     assert "Apply every rule above to that atomic claim alone" in prompt
     assert seen["schema"] == "AtomicStanceBatch"
     stance_rows = [row for row in get_usage()[before:] if row.get("purpose") == "stance"]
-    assert stance_rows[-1]["prompt_version"] == "stance_v7"
+    assert stance_rows[-1]["prompt_version"] == "stance_v9"
+    assert "Sucking a lemon or drinking lemon-infused water can kill COVID-19 viral particles" in prompt
+    assert "never a support" in prompt
 
     seen.clear()
     single = {
@@ -1335,6 +1337,72 @@ def test_stance_v7_keeps_v6_and_states_the_share_date():
     assert "This claim was shared on 2026-11-18" in seen["prompt"]
     assert "more than one atomic claim" not in seen["prompt"]
     assert seen["schema"] == "StanceBatch"
+
+
+# One sentence per rule. Both the single-claim prompt and the multi-claim
+# prompt have to carry it, because a rule that only one path sees is a
+# rule the other path has lost.
+_V9_RULES = (
+    ("share date", "This claim was shared on 2026-11-18"),
+    ("relative time", "till Monday"),
+    ("different occasion", "different occasion is NEUTRAL, not a refute"),
+    ("cure", "may slightly lower blood sugar"),
+    ("small effect refutes a cure", 'refutes "cures diabetes"'),
+    ("named place", "IIMB metro station"),
+    ("campus is not the station", "visited the IIM Bangalore campus"),
+    ("planned is not happened", "planned, not confirmed"),
+    ("different event", "different line, different event"),
+    ("old evidence cannot support", "Old evidence CANNOT support"),
+    ("old evidence can refute", "It CAN refute"),
+    ("myth list is a refute", "Sucking a lemon or drinking lemon-infused water can kill COVID-19 viral particles"),
+    ("myth list is never support", "never a support"),
+)
+
+
+def test_stance_v9_rules_are_in_both_rendered_prompts():
+    from misinfo_agent.investigate import Passage, judge_stance
+    from misinfo_agent.llm import set_fake
+
+    seen = {}
+
+    def fake(prompt, schema, images):
+        seen["prompt"] = prompt
+        return {"judgements": []}
+
+    passage = Passage(
+        passage_id="P1",
+        url="https://example.com/a",
+        netloc="example.com",
+        title="t",
+        text="A passage about the Pink Line and nothing else of substance here.",
+        cos=0.9,
+        fetched=True,
+    )
+    multi = {
+        "claim": "PM Modi inaugurated the Pink Line and then visited the campus",
+        "claim_date": "2026-11-18",
+        "atomic_claims": [
+            {"id": "A1", "text": "PM Modi inaugurated the Pink Line", "core": True, "checkable": True},
+            {"id": "A2", "text": "PM Modi visited the IIM Bangalore campus", "core": False, "checkable": True},
+        ],
+    }
+    single = {
+        "claim": "PM Modi inaugurated the Pink Line",
+        "claim_date": "2026-11-18",
+    }
+    set_fake(fake)
+    try:
+        judge_stance(multi, [passage])
+        multi_prompt = seen["prompt"]
+        judge_stance(single, [passage])
+        single_prompt = seen["prompt"]
+    finally:
+        set_fake(None)
+    assert "more than one atomic claim" in multi_prompt
+    assert "more than one atomic claim" not in single_prompt
+    for name, sentence in _V9_RULES:
+        assert sentence in single_prompt, name
+        assert sentence in multi_prompt, name
 
 
 def test_credibility_tiers():
@@ -1986,6 +2054,325 @@ def test_duplicate_quotes_in_a_group_collapse():
     assert snippet_rows[0]["snippet_only"] is True
 
 
+def _window_row(url, text, stance, published, reason="The page says so"):
+    return {
+        "passage": _stance_passage("P1", url, text, published=published),
+        "stance": stance,
+        "quote": text,
+        "reason": reason,
+        "quote_unverified": False,
+        "atomic_id": "A1",
+    }
+
+
+def test_relative_time_window_drops_another_occasion_and_keeps_a_dated_status():
+    """A 'till Monday' claim is this fortnight. 'from 1 December' is not."""
+    from misinfo_agent.investigate import (
+        _apply_relative_window,
+        _mark_reason_mismatches,
+        _relative_time_claim,
+        build_evidence,
+    )
+
+    schools = {
+        "claim": "All Bengaluru schools closed till Monday due to heavy rain",
+        "claim_date": "2026-11-19",
+        "time_clues": "",
+    }
+    old = _window_row(
+        "https://timesofindia.indiatimes.com/city",
+        "However, no holiday announcement has been made for schools in the city",
+        "refutes",
+        "2024-12-03",
+    )
+    _apply_relative_window(schools, [old])
+    assert old["stance"] == "neutral"
+    assert old["reason"] == "about a different date"
+    assert build_evidence(schools, [old]) == []
+
+    # Three days before the share date is the same week. The refute stands.
+    same_week = _window_row(
+        "https://www.thehindu.com/news",
+        "No holiday has been declared for Bengaluru schools this Monday",
+        "refutes",
+        "2026-11-16",
+    )
+    _apply_relative_window(schools, [same_week])
+    assert same_week["stance"] == "refutes"
+    assert same_week["date_unknown"] is False
+    kept = build_evidence(schools, [same_week])
+    assert len(kept) == 1
+    assert kept[0]["stance"] == "refutes"
+    assert kept[0]["date_unknown"] is False
+
+    # The fourteenth day before the claim is still inside. The next day is not.
+    edge = _window_row("https://www.ndtv.com/a", "Schools stay open on Monday", "supports", "2026-11-05")
+    outside = _window_row("https://www.ndtv.com/b", "Schools stay open on Monday", "supports", "2026-11-04")
+    later = _window_row("https://www.ndtv.com/c", "Schools were shut last month", "refutes", "2026-11-20")
+    _apply_relative_window(schools, [edge, outside, later])
+    assert edge["stance"] == "supports"
+    assert outside["stance"] == "neutral"
+    assert outside["reason"] == "about a different date"
+    assert later["reason"] == "about a different date"
+
+    # No trusted day: the label stays, and the row says the date is unknown.
+    undated = _window_row(
+        "https://www.deccanherald.com/city",
+        "The department has not announced a school holiday",
+        "refutes",
+        None,
+    )
+    _apply_relative_window(schools, [undated])
+    assert undated["stance"] == "refutes"
+    assert undated["date_unknown"] is True
+    undated_rows = build_evidence(schools, [undated])
+    assert undated_rows[0]["stance"] == "refutes"
+    assert undated_rows[0]["date_unknown"] is True
+
+    # Extract can put the weekday on time_clues and leave the claim line plain.
+    assert _relative_time_claim({"claim": "Schools are closed", "time_clues": "till Monday"}) is True
+    assert _relative_time_claim({"claim": "Telegram has been banned from 2026"}) is False
+
+    notes = {
+        "claim": "₹500 notes printed before 2016 are invalid from 1 December",
+        "claim_date": "2026-11-19",
+        "time_clues": "",
+    }
+    assert _relative_time_claim(notes) is False
+    rbi = _window_row(
+        "https://www.rbi.org.in/notice",
+        "500 and 1000 denominations shall cease to be legal tender with effect from November 09, 2016",
+        "refutes",
+        "2016-11-08",
+    )
+    _apply_relative_window(notes, [rbi])
+    assert rbi["stance"] == "refutes"
+    assert rbi["reason"] != "about a different date"
+    rbi_rows = build_evidence(notes, [rbi])
+    assert len(rbi_rows) == 1
+    assert rbi_rows[0]["stance"] == "refutes"
+    assert rbi_rows[0]["published_date"] == "2016-11-08"
+
+    # The window rewrites the reason, so the mismatch flag does not fire on it.
+    _mark_reason_mismatches([old])
+    assert old["reason_label_mismatch"] is False
+
+
+def test_reason_label_mismatch_is_counted_and_the_label_stays():
+    """A neutral that says 'not a cure' is a measurement, not a new label."""
+    from misinfo_agent.investigate import _mark_reason_mismatches, build_evidence
+
+    neutral = _window_row(
+        "https://www.healthline.com/garlic",
+        "Garlic may help lower blood sugar for some people with type 2 diabetes",
+        "neutral",
+        "2024-03-01",
+        reason="States garlic may help lower blood sugar, not a cure",
+    )
+    refute = _window_row(
+        "https://www.who.int/news",
+        "There is no evidence that garlic cures diabetes",
+        "refutes",
+        "2024-03-01",
+        reason="The page says there is no evidence of a cure",
+    )
+    plain = _window_row(
+        "https://example.com/story",
+        "A clinic described how patients use garlic in food",
+        "neutral",
+        "2024-03-01",
+        reason="The page does not discuss a cure",
+    )
+    # "does not" is a cue, so this one counts. The label is still neutral.
+    before = plain["stance"]
+    _mark_reason_mismatches([neutral, refute, plain])
+    assert neutral["stance"] == "neutral"
+    assert neutral["reason_label_mismatch"] is True
+    assert refute["stance"] == "refutes"
+    assert refute["reason_label_mismatch"] is False
+    assert plain["stance"] == before
+    assert plain["reason_label_mismatch"] is True
+    # Neutrals are not evidence. The flag did not promote them.
+    assert build_evidence({"claim_date": "2026-11-19"}, [neutral, plain]) == []
+    assert build_evidence({"claim_date": "2026-11-19"}, [refute])[0]["stance"] == "refutes"
+
+
+def _repair_row(passage_id, url, text, reason, stance="neutral", atomic="A1", published="2024-03-01"):
+    row = _window_row(url, text, stance, published, reason=reason)
+    row["passage"] = row["passage"].model_copy(update={"passage_id": passage_id})
+    row["atomic_id"] = atomic
+    return row
+
+
+def test_repair_runs_once_when_reasons_disagree_and_not_at_all_when_they_do_not():
+    """Mismatched neutrals are one repair call. A clean table makes none."""
+    from misinfo_agent.investigate import _repair_mismatches
+    from misinfo_agent.llm import get_usage, reset_usage, set_fake
+
+    cure = "A review found garlic does not cure diabetes and the trials are thin."
+    small = "The effects are small and do not replace treatment for type 2 diabetes."
+    rows = [
+        _repair_row("P1", "https://www.who.int/news", cure, "not a cure"),
+        _repair_row("P2", "https://www.nih.gov/garlic", small, "only a small effect"),
+    ]
+    calls = []
+
+    def fake(prompt, schema, images):
+        calls.append((schema.__name__, prompt))
+        return {
+            "judgements": [
+                {
+                    "passage_id": "P1",
+                    "atomic_id": "A1",
+                    "stance": "refutes",
+                    "quote": "garlic does not cure diabetes",
+                    "reason": "The page says it is not a cure",
+                },
+                {
+                    "passage_id": "P2",
+                    "atomic_id": "A1",
+                    "stance": "refutes",
+                    "quote": "The effects are small",
+                    "reason": "Only a small effect",
+                },
+            ]
+        }
+
+    reset_usage()
+    set_fake(fake)
+    try:
+        failed, note = _repair_mismatches({"claim": "Garlic cures diabetes"}, rows)
+    finally:
+        set_fake(None)
+    assert failed == 0
+    assert note == ""
+    assert len(calls) == 1
+    assert calls[0][0] == "RepairBatch"
+    assert "P1" in calls[0][1] and "P2" in calls[0][1]
+    usage = [row for row in get_usage() if row.get("purpose") == "stance_repair"]
+    assert len(usage) == 1
+    assert usage[0]["prompt_version"] == "repair_v1"
+    assert rows[0]["stance"] == "refutes"
+    assert rows[0]["repaired_from"] == "neutral"
+    assert rows[1]["repaired_from"] == "neutral"
+
+    clean = [_repair_row("P9", "https://example.com/a", "A clinic described how patients use garlic in food", "A recipe page")]
+    def boom(prompt, schema, images):
+        raise AssertionError("repair was called")
+
+    set_fake(boom)
+    try:
+        failed, note = _repair_mismatches({"claim": "Garlic cures diabetes"}, clean)
+    finally:
+        set_fake(None)
+    assert failed == 0
+    assert clean[0]["stance"] == "neutral"
+    assert "repaired_from" not in clean[0]
+
+
+def test_repaired_refute_with_a_bad_quote_stays_neutral():
+    from misinfo_agent.investigate import _repair_mismatches
+    from misinfo_agent.llm import set_fake
+
+    text = "Garlic may help lower blood sugar for some people with type 2 diabetes."
+    row = _repair_row("P1", "https://www.healthline.com/garlic", text, "not a cure")
+
+    def fake(prompt, schema, images):
+        return {
+            "judgements": [{
+                "passage_id": "P1",
+                "atomic_id": "A1",
+                "stance": "refutes",
+                "quote": "this sentence was not on the page",
+                "reason": "The page denies a cure",
+            }]
+        }
+
+    set_fake(fake)
+    try:
+        failed, _note = _repair_mismatches({"claim": "Garlic cures diabetes"}, [row])
+    finally:
+        set_fake(None)
+    assert failed == 1
+    assert row["stance"] == "neutral"
+    assert row.get("repaired_from") in {None, ""}
+
+
+def test_date_window_still_clears_a_repaired_row_about_another_day():
+    """Repair may call it a refute. A 2024 page is still a different Monday."""
+    from misinfo_agent.investigate import _apply_relative_window, _repair_mismatches, build_evidence
+    from misinfo_agent.llm import set_fake
+
+    text = "However, no holiday announcement has been made for schools in the city."
+    row = _repair_row(
+        "P1",
+        "https://timesofindia.indiatimes.com/city",
+        text,
+        "There is no evidence of a holiday",
+        published="2024-12-03",
+    )
+    state = {
+        "claim": "All Bengaluru schools closed till Monday due to heavy rain",
+        "claim_date": "2026-11-19",
+        "time_clues": "",
+    }
+
+    def fake(prompt, schema, images):
+        return {
+            "judgements": [{
+                "passage_id": "P1",
+                "atomic_id": "A1",
+                "stance": "refutes",
+                "quote": "no holiday announcement has been made",
+                "reason": "The page says there is no holiday",
+            }]
+        }
+
+    set_fake(fake)
+    try:
+        _repair_mismatches(state, [row])
+    finally:
+        set_fake(None)
+    assert row["stance"] == "refutes"
+    assert row["repaired_from"] == "neutral"
+    _apply_relative_window(state, [row])
+    assert row["stance"] == "neutral"
+    assert row["reason"] == "about a different date"
+    assert row["repaired_from"] == "neutral"
+    assert build_evidence(state, [row]) == []
+
+
+def test_repair_caps_at_twenty_rows_in_one_call():
+    from misinfo_agent.investigate import _repair_mismatches
+    from misinfo_agent.llm import set_fake
+
+    rows = [
+        _repair_row(
+            f"P{index}",
+            f"https://example.com/{index}",
+            f"Page {index} says garlic does not cure diabetes in this trial.",
+            "not a cure",
+        )
+        for index in range(1, 22)
+    ]
+    seen = []
+
+    def fake(prompt, schema, images):
+        seen.append(prompt)
+        return {"judgements": []}
+
+    set_fake(fake)
+    try:
+        _repair_mismatches({"claim": "Garlic cures diabetes"}, rows)
+    finally:
+        set_fake(None)
+    assert len(seen) == 1
+    assert "passage_id: P1\n" in seen[0]
+    assert "passage_id: P20\n" in seen[0]
+    assert "passage_id: P21\n" not in seen[0]
+    assert all(row["stance"] == "neutral" for row in rows)
+
+
 def test_topup_runs_only_when_tier2_groups_are_thin(monkeypatch):
     import misinfo_agent.investigate as investigate_module
     from misinfo_agent.llm import set_fake
@@ -2081,8 +2468,10 @@ def test_second_call_skips_known_queries_and_continues_ids(monkeypatch):
 
     def fake_llm(prompt, schema, images):
         if schema.__name__ == "TopupBatch":
+            # Round 2 is only the plan's unused queries. A second top-up
+            # would be the model inventing searches the gate did not allow.
             if phase["second"]:
-                return {"queries": ["extra one", "gamma extra query"]}
+                raise AssertionError("round 2 ran the top-up")
             return {"queries": ["extra one", "extra two"]}
         if "NDTV reported" in prompt:
             quote = "NDTV reported the notice is genuine"
@@ -2111,16 +2500,60 @@ def test_second_call_skips_known_queries_and_continues_ids(monkeypatch):
         set_fake(None)
     first_queries = set(first["investigate_stats"]["queries"])
     assert first_queries
-    assert "gamma extra query" not in first_queries
+    assert second["investigate_stats"]["topup_used"] is False
     for query in second_searches:
         assert query not in first_queries
-    assert "gamma extra query" in second_searches
-    first_ids = {row["id"] for row in first["evidence"]}
-    second_ids = {row["id"] for row in second["evidence"]}
-    assert first_ids
-    assert second_ids
-    assert first_ids.isdisjoint(second_ids)
-    assert min(int(row["id"][1:]) for row in second["evidence"]) > max(int(row["id"][1:]) for row in first["evidence"])
+        assert not str(query).startswith("extra")
+
+
+def test_round_two_runs_unused_plan_queries_and_skips_the_topup(monkeypatch):
+    import misinfo_agent.investigate as investigate_module
+    from misinfo_agent.investigate import build_queries
+    from misinfo_agent.llm import set_fake
+
+    monkeypatch.setattr(investigate_module, "get_encoder", lambda: _FakeEncoder())
+    state = _state("Health", claim="CLAIM the ministry banned the medicine")
+    plan = [query.text for query in build_queries(state)]
+    assert len(plan) >= 2
+    leftover = plan[-1]
+    # One plan line was never searched. The prior evidence is E2, so a
+    # new row has to continue at E3 rather than start again at E1.
+    state["investigate_stats"] = {"queries": plan[:-1]}
+    state["evidence"] = [{"id": "E2"}]
+    searched = []
+
+    def fake_search(query, **kwargs):
+        searched.append(query)
+        return [_search_hit("https://www.ndtv.com/new", _body("0.60", "NDTV reported the notice is genuine"))]
+
+    def fake_llm(prompt, schema, images):
+        if schema.__name__ == "TopupBatch":
+            raise AssertionError("round 2 ran the top-up")
+        ids = [line for line in prompt.splitlines() if line.startswith("P") and line[1:].isdigit()]
+        return {
+            "judgements": [
+                {
+                    "passage_id": passage_id,
+                    "stance": "supports",
+                    "quote": "NDTV reported the notice is genuine",
+                    "reason": "The page confirms it",
+                }
+                for passage_id in ids
+            ]
+        }
+
+    set_fake_search(fake_search)
+    set_fake(fake_llm)
+    try:
+        result = investigate(state)
+    finally:
+        set_fake(None)
+    assert leftover in searched
+    for query in searched:
+        assert query not in plan[:-1]
+    assert result["investigate_stats"]["topup_used"] is False
+    assert result["investigate_stats"]["topup_queries"] == []
+    assert [row["id"] for row in result["evidence"]] == ["E3"]
 
 
 def _body(score: str, quote: str) -> str:

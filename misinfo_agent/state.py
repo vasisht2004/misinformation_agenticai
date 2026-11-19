@@ -148,6 +148,11 @@ class ClaimState(TypedDict, total=False):
     # Box 5. Hybrid-search hits. Empty means the memory was searched and nothing
     # survived the filters, which is different from the key being absent.
     matches: list
+    # Box 6. The single highest-cosine hit, including the archive verdict
+    # and true_version. Empty when memory returned nothing. Assess reads
+    # this on an exact fresh prior and shows it to the draft on a similar
+    # hit. It is not itself a verdict.
+    best_match: dict
 
     # Box 6. "exact", "similar" or "none". Thresholds alone do not decide this.
     # A disagreeing date, amount, year, number, name or subject downgrades
@@ -179,24 +184,84 @@ class ClaimState(TypedDict, total=False):
     # passages split, independent groups on each side, circulation
     # sightings, seconds, and a note when a cap stopped the round short.
     investigate_stats: dict
-    # Box 9. How many investigate rounds have run. The gate stops at 2.
+    # Box 9. How many investigate rounds have already finished. The gate
+    # and box 12 stop at config.MAX_SEARCH_ROUNDS. A search_more return
+    # is the only write that advances this.
     rounds: int
-    # Box 9. "sufficient", "insufficient", "conflicting" or "search_more".
+    # Box 9. "sufficient", "insufficient", "conflicting", "search_more",
+    # "error", or "skipped". error is a stance failure after the search
+    # budget, never a lack of sources. skipped means box 6 reused an
+    # exact fresh prior, or the submission is not checkable, so this
+    # table was not judged. This is the gate_decision.
     gate: str
+    # Box 9. Plain sentences for the card: one line per atomic claim,
+    # then why the overall gate is what it is. A shout is not in here.
+    gate_reasons: list
+    # Box 9. Atomic-claim id -> status. not_checkable, conflicting,
+    # refuted, supported, or insufficient. The overall gate follows
+    # the core claim only.
+    atomic_status: dict
 
-    # Box 8+10. False / Misleading / True / Unverifiable / Other.
-    # Computed from evidence by rule, not taken from the model's self-report.
-    verdict: str
-    # Box 8+10. Confidence from evidence features, not the LLM's own score.
+    # Box 8+10. False / Misleading / True / Unverifiable / Other, or null
+    # when the gate is conflicting or error and a person has to decide.
+    # Computed from the evidence rule, not taken from the model's draft.
+    verdict: str | None
+    # Box 8+10. Confidence from evidence features, or from the prior's
+    # cosine when the archive row is reused. Never the model's own score.
+    # On Unverifiable this is confidence that the claim is unverifiable.
     confidence: float
-    # Box 8+10. Plain-language explanation, true version and the shareable
-    # correction. Box 14–15 displays this; it does not rewrite it.
+    # Box 8+10. The core claim's explanation. Citations look like [E2].
+    # Box 14–15 displays this; it does not rewrite it.
     explanation: str
+    # Box 8+10. What the evidence says is actually the case, with ids.
+    # Set only when the verdict is True, False, or Misleading. On a
+    # reused prior this is the archive's true_version, copied rather
+    # than rewritten, and it cites that fact-check as [C1].
+    true_version: str
+    # Box 8+10. Plain language a person could forward. No evidence ids.
+    # Set only when the verdict is True, False, or Misleading. For
+    # Unverifiable, and when the verdict is withheld, this is the fixed
+    # line that two credible sources were not found.
+    correction_message: str
+    # Box 8+10. What the rows said when the verdict is Unverifiable or
+    # withheld. It may cite evidence ids. It is not the shareable line.
+    what_we_found: str
+    # Box 8+10. Unconfirmed checkable parts when the verdict is True.
+    # The verdict label stays True; these are the parts the card names.
+    caveats: list
+    # Box 8+10. Evidence ids that survived the citation guard, in the
+    # order the text cited them.
+    citations: list
+    # Box 8+10. One entry per atomic claim: atomic_id, explanation,
+    # refute_kind, citations. refute_kind is entirely_false, wrong_detail,
+    # or null. The verdict rule reads the core's kind and nothing else.
+    atomic_results: list
+    # Box 8+10. Sentences the citation guard dropped, a template that
+    # replaced an empty draft, and the note when the model call failed.
+    assess_notes: list
+    # Box 8+10. True when the verdict is withheld because the gate is
+    # conflicting or error, or the archive row had no verdict. Box 12
+    # already sends those gates to a person; this flag is for the card.
+    needs_human: bool
 
-    # Box 11. "High", "Medium" or "Low".
+    # Box 11. "High", "Medium" or "Low". This is the priority_level.
+    # The score that produced it is priority_score. Style signals can
+    # move this. They cannot move the verdict.
     priority: str
-    # Box 12. "alert", "unsure" (human), "search_more" or "store".
+    # Box 11. Weighted harm, novelty, reach and urgency, in [0, 1].
+    priority_score: float
+    # Box 11. One plain sentence per component, in that order.
+    priority_reasons: list
+    # Box 12. "alert", "human", "search_more" or "store".
+    # human is the pause. Box 13 records what the person did.
+    # An alert still pauses there while ALERT_NEEDS_APPROVAL is on;
+    # the decision stays "alert" so the card can say what was asked.
     decision: str
+    # Box 12. Why `decision` was chosen. An alert says box 13 must
+    # approve it before anything is sent.
+    decision_reasons: list
+    # Box 12. The confidence bar, a / (a + bH). Higher harm, lower bar.
+    p_star: float
     # Box 13. Reviewer action once a paused run resumes. Empty until then.
     human: dict
 

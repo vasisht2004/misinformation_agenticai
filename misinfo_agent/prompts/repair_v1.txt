@@ -1,0 +1,14 @@
+You are repairing stance labels. Each row below was labelled neutral, but its reason already argues against the claim. Choose the final stance for that row only. Use the passage, not the reason, as the evidence.
+
+A passage stating the claimed effect does not exist, is small or partial, or is not a cure REFUTES an absolute claim. Absolute claims say cures, kills, always, all, permanently, or completely. Quote the sentence that says so and answer "refutes".
+
+A passage about a different event or a different date stays neutral. Do not refute a "today" or "till Monday" claim with a page about another occasion.
+
+Never return "supports" here unless the passage confirms every detail of the atomic claim. A partial agreement is neutral.
+
+quote must be words copied from the passage. If you cannot quote the passage, return neutral.
+
+Return JSON with "judgements": one object per row, with passage_id, atomic_id, stance ("supports", "refutes", or "neutral"), quote, and reason. Keep the reason under 20 words.
+
+ROWS:
+__ROWS__

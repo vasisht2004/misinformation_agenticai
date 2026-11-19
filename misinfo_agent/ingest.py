@@ -499,11 +499,7 @@ def _style_signals(raw: str, *, count_emoji: bool = True) -> dict:
         label = _LABEL_RECEIVED
     else:
         label = None
-    letters = [ch for ch in raw if ch.isalpha()]
-    if letters:
-        caps_ratio = round(sum(ch.isupper() for ch in letters) / len(letters), 4)
-    else:
-        caps_ratio = 0.0
+    caps_ratio = _caps_ratio(raw)
     # U+203C is one character and two exclamation marks. Count it as two
     # so a banner of ‼ and a banner of !! weigh the same.
     exclaim = raw.count("!") + 2 * raw.count("‼") + raw.count("❗") + raw.count("⁉")
@@ -518,6 +514,48 @@ def _style_signals(raw: str, *, count_emoji: bool = True) -> dict:
         "conspiracy_phrases": [name for name, pattern in _CONSPIRACY if pattern.search(raw)],
         "certainty_words": [name for name, pattern in _CERTAINTY if pattern.search(raw)],
     }
+
+
+# An all-caps token this short is a name (HSBC, RBI, AIIMS, PIB), not
+# someone shouting. Longer banners (BREAKING) still count.
+_ACRONYM_CAP = 5
+# Alarm is the chip a reader sees. Above 0.30 of the remaining letters,
+# or three exclamation marks, or three emoji. Two of either is just emphasis.
+_ALARM_CAPS = 0.30
+_ALARM_EXCLAIM = 3
+_ALARM_EMOJI = 3
+
+
+def alarm_style(signals: dict) -> bool:
+    """True when the wording is a banner, not a normal sentence.
+
+    caps_ratio already ignores short acronyms, so this bar is about the
+    rest of the letters. A fact name like HSBC does not light it. The
+    garlic forward still does, because of the exclamation marks.
+    """
+    signals = signals or {}
+    caps = float(signals.get("caps_ratio") or 0)
+    exclaim = int(signals.get("exclaim_count") or 0)
+    emoji = int(signals.get("emoji_count") or 0)
+    return caps > _ALARM_CAPS or exclaim >= _ALARM_EXCLAIM or emoji >= _ALARM_EMOJI
+
+
+def _caps_ratio(raw: str) -> float:
+    """Share of letters in capitals, with short acronyms left out.
+
+    Both the capitals and the letters of HSBC / RBI / AIIMS / PIB are
+    skipped. Counting them made a plain sentence about HSBC look shouted.
+    """
+    upper = 0
+    total = 0
+    for token in re.findall(r"[A-Za-z]+", raw or ""):
+        if token.isupper() and len(token) <= _ACRONYM_CAP:
+            continue
+        total += len(token)
+        upper += sum(ch.isupper() for ch in token)
+    if not total:
+        return 0.0
+    return round(upper / total, 4)
 
 
 def _authorities(raw: str) -> list[str]:

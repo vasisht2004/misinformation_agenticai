@@ -314,6 +314,31 @@ def test_image_bytes_are_loaded_from_the_path(tmp_path):
     assert out["entities"]["places"] == ["Bengaluru"]
 
 
+def test_extract_v2_prompt_splits_attribution_from_the_core():
+    # The fake never sees Gemini. The assertion is that the prompt it was
+    # handed states the rule: the core is the fact, and who said it is
+    # a separate atomic claim.
+    seen = {}
+
+    def fake(prompt, schema, images):
+        seen["prompt"] = prompt
+        return _claim()
+
+    set_fake(fake)
+    try:
+        extract(_state(text=(
+            "AIIMS Delhi doctors have confirmed that drinking raw garlic juice "
+            "every morning cures Type 2 diabetes in 30 days."
+        )))
+    finally:
+        clear_fake()
+    prompt = seen["prompt"]
+    assert "Drinking raw garlic juice every morning cures Type 2 diabetes in 30 days" in prompt
+    assert "AIIMS Delhi doctors confirmed this" in prompt
+    assert "Attribution is its own atomic claim" in prompt
+    assert "without who said it" in prompt
+
+
 def test_quota_error_propagates():
     def fake(prompt, schema, images):
         raise LLMQuotaError("extract", "daily cap")

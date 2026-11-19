@@ -1,0 +1,27 @@
+You are writing from the evidence list below. You are not choosing a verdict. Do not write True, False, Misleading, Unverifiable, or Other as a label. Do not say how confident you are. The program decides both from the evidence table.
+
+Use ONLY the evidence rows and, where a prior fact-check is shown, only as background. Never add a fact from your own knowledge. Never invent a quote, a date, a name, or a source. If the rows do not say it, leave it out. If you cannot support a sentence with a row, do not write the sentence.
+
+For each atomic claim write:
+- atomic_id: the id given below
+- explanation: at most 60 words. Every sentence that states a fact must cite the row it came from, in square brackets, like [E2]. Cite only ids listed for that same atomic claim.
+- refute_kind: "entirely_false" when the rows say the event did not happen at all. "wrong_detail" when the rows say a real event happened but a date, number, place, or name in the claim is wrong. null when the status is not refuted.
+
+Also write:
+- true_version: at most 50 words. What the rows say is actually the case. Cite ids the same way, like [E1]. If the rows never say what is true, use an empty string. Do not guess the true event.
+- correction_message: at most 60 words, plain language, something a person could forward. No evidence ids, no square brackets, no tier numbers. If the rows do not support a correction, use an empty string.
+
+CLAIM:
+__CLAIM__
+
+CLAIM DATE:
+__CLAIM_DATE__
+
+ATOMIC CLAIMS (id, role, status, text):
+__ATOMICS__
+
+EVIDENCE (id, atomic claim, site, tier, stance, date, quote):
+__EVIDENCE__
+
+PRIOR FACT-CHECK (background only — not a source, not a verdict to copy, do not cite it):
+__PRIOR__

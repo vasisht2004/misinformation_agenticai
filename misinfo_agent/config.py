@@ -31,11 +31,11 @@ SUBMISSIONS_DB = DATA_DIR / "submissions.db"
 # Tests point this at a temporary directory. data/ is gitignored.
 UPLOADS_DIR = DATA_DIR / "uploads"
 
-# On when a person submits a forward. The evaluation sets it False.
-# Scoring an article is not that article being forwarded again, and
-# box 11's reach reads submission_count. A measured claim must not
-# look like a crowd.
-RECORD_SUBMISSIONS = True
+# Off unless a real submission turns it on. scripts/try_claim.py does
+# that with --record. Scoring a claim, and a demo of the pipeline, are
+# not another person forwarding it. Box 11's reach reads
+# submission_count, so a test run must not look like a crowd.
+RECORD_SUBMISSIONS = False
 
 # Read-only inputs. See DATA.md. Never load the `content` column.
 CLASSIFIED_PATH = RAW_DIR / "classified_v2.parquet"
@@ -78,6 +78,64 @@ DOMAINS = (
     "Sports",
     "Science & technology",
 )
+
+# How much a false claim in this domain can hurt someone, on 0–1.
+# Box 11 adds this to the priority score. Box 12 uses the same number
+# as H in the confidence bar, so a domain must not be "high" in one
+# box and "low" in the other.
+#
+# High (a person can act on it today and get hurt):
+#   Health — a false cure or a false outbreak changes treatment.
+#   Religion & communal — a false attack story is how a riot starts.
+#   Disasters & accidents — people flee, or they stay in the way.
+#   Finance & scams — the forward asks for money or a PIN.
+# Medium-high (real harm, one step removed from the body or the wallet):
+#   Politics & elections — can move a vote or a rumour about a candidate.
+#   Crime & law — names someone as a criminal. Serious, and usually
+#   checkable against a court or a police note, so it sits under health.
+# Defence is not in that pair. A false strike can scare people, but the
+# brief did not put it with the four that need the lowest bar, so it
+# stays just under HARM_HIGH until a harmful red flag pushes it over.
+# Society and science are ordinary public claims. Sports and celebrity
+# news are upsetting when wrong and rarely dangerous; a death hoax is
+# still Entertainment, not Health, because the harm is distress rather
+# than a treatment someone skips.
+DOMAIN_HARM = {
+    "Health": 0.95,
+    "Religion & communal": 0.95,
+    "Disasters & accidents": 0.90,
+    "Finance & scams": 0.90,
+    "Politics & elections": 0.70,
+    "Crime & law": 0.70,
+    "Defence & international": 0.60,
+    "Society & other": 0.45,
+    "Science & technology": 0.40,
+    "Entertainment & celebrities": 0.20,
+    "Sports": 0.15,
+}
+
+# Added on top of the domain, then capped at 1. These four make the
+# content more dangerous, not merely louder. "Urgency" and "Sensational
+# style" are packaging; box 11 scores those under urgency, and scoring
+# them here as well would count one shout twice. "communal targeting"
+# is not one of the 11 archive labels. It is accepted when a box writes
+# it, and priority.py also sets it when the claim names a community and
+# a violent act.
+HARM_RED_FLAGS = (
+    "Fear or outrage",
+    "Call to forward",
+    "Fake or vague authority",
+    "communal targeting",
+)
+# Each distinct flag. Four of them on a medium domain can reach the cap.
+# One of them on health already sits at the cap, which is the point:
+# health does not need a shout to be serious, and a shout cannot make
+# it "more than sure".
+HARM_FLAG_BUMP = 0.10
+# "H high" in box 12. Above the medium-high band (0.70) and below the
+# four domains that start at 0.90. Politics and crime cross it when a
+# harmful flag is also present. Sports cannot, even with every flag.
+HARM_HIGH = 0.80
 
 # The warning-sign labels on classified_v2.parquet. Counted 18 Nov 2026
 # from that file with columns=["red_flags"] only (the article text was
@@ -236,6 +294,14 @@ TAVILY_MONTHLY_MAX = 800
 # The counter lives in the process; the caller resets it when a claim starts.
 MAX_SEARCHES_PER_CLAIM = 8
 
+# Investigate rounds the gate and the decider may already have used.
+# The first call usually sees 1 (one search finished). While the count
+# is still under this, a thin table or a failed stance check may ask
+# for another round. At this count the answer is final: insufficient,
+# or error if the stance call itself failed. Two is the whole budget,
+# not two extra on top of an uncounted first search.
+MAX_SEARCH_ROUNDS = 2
+
 # Hosts of the 15 fact-check publications in classified_v2.parquet.
 # Built once on 11 Nov 2026: read columns=["url"] only (52,678 rows, none
 # empty), take the hostname, lowercase it, and strip a leading "www.".
@@ -309,6 +375,20 @@ PASSAGE_MIN_COS = 0.45
 # Off in the demo. The eval turns it on so a page published after the claim
 # cannot count as evidence the system could have had at the time.
 EVAL_DROP_AFTER_CLAIM = False
+
+# A relative-time claim ("today", "till Monday") is about this fortnight.
+# Investigate forces a trusted page dated more than this many days before
+# the claim, or any trusted page dated after the claim, to neutral: that
+# page is a different occasion. A dated status claim ("invalid from 1
+# December", "banned from 2026") is not in this window, so an old page
+# can still refute it. Unknown dates are kept and flagged.
+RELATIVE_TIME_WINDOW_DAYS = 14
+
+# Stance is frozen at stance_v9 (misinfo_agent/prompts/stance_v9.txt,
+# prompt_version "stance_v9" in investigate.judge_stance). A change to
+# that prompt, or to the code that rewrites a stance label, needs a full
+# regression on the hand-labelled rows in data/eval/day3_evidence.csv
+# before it becomes the default. Do not ship a new version off one live claim.
 
 # "keep" leaves a passage whose date we never found. "drop" removes it,
 # and only while the leakage guard is on: a demo with no claim date would
@@ -623,3 +703,93 @@ OFFICIAL_DOMAINS = {
         "pib.gov.in",
     ),
 }
+
+# Box 11. Hand-set. scripts/priority_sensitivity.py moves each one by
+# 20% and reports how many fixture levels change. They sum to 1 so the
+# score stays in [0, 1] when every component does.
+# Harm is the largest weight because a calm health rumour still matters
+# more than a shouted sports score. Reach is next: a claim already in
+# a thousand chats is the one a person should see first. Urgency is
+# time, which expires. Novelty is the smallest: a new wording of an old
+# rumour is not, by itself, an emergency.
+PRIORITY_WEIGHTS = {
+    "harm": 0.40,
+    "novelty": 0.15,
+    "reach": 0.25,
+    "urgency": 0.20,
+}
+PRIORITY_HIGH = 0.60
+PRIORITY_MEDIUM = 0.35
+
+# Reach is log-scaled. 20 is "this is already everywhere": several
+# repeat submissions, a handful of outlets, and WhatsApp's own viral
+# label. Past that the score stays at 1 so a 500th repost cannot drown
+# harm. The two forward labels are not equal. "Forwarded many times" is
+# WhatsApp saying the message left the original chat and kept going.
+# "Forwarded as received" only says the sender did not type it. 4 against
+# 1 makes the viral label move the log about as much as several repeats,
+# and keeps a single ordinary forward visible but short of a crowd.
+REACH_LOG_CAP = 20
+REACH_FORWARD_MANY = 4
+REACH_FORWARD_RECEIVED = 1
+
+# Urgency points, capped at 1 inside priority.py. The word cap stops
+# five synonyms of "breaking" from saturating the component on their own.
+# Share is separate because a forward request is a different act from a
+# banner word. Deadline and a near date share one bucket: both say the
+# claim is time-critical, and counting them twice would treat "tomorrow's
+# deadline" as twice as urgent as a deadline next month.
+URGENCY_PER_WORD = 0.30
+URGENCY_WORD_CAP = 0.60
+URGENCY_SHARE = 0.35
+URGENCY_DEADLINE = 0.40
+# Three weeks. A "from 1 December" rumour checked on 15 November is a
+# deadline, not a historical detail. A date next season is the subject
+# of the claim and does not raise urgency.
+URGENCY_NEAR_DAYS = 21
+
+# Box 12. p* = P_STAR_A / (P_STAR_A + P_STAR_B * H).
+# H = 0 → 1.0, so a harmless claim must be certain before anyone acts.
+# H = 1 → 0.25, so a dangerous claim is acted on at a lower confidence.
+# The margin is how close "almost sure" has to be before another search
+# is worth more than sending the file to a person.
+P_STAR_A = 1.0
+P_STAR_B = 3.0
+P_STAR_MARGIN = 0.15
+
+# Every alert waits at box 13. The decision string stays "alert" so the
+# card can say what was requested; the pause is this flag, not a rename.
+ALERT_NEEDS_APPROVAL = True
+
+# Box 10. Provisional. The eval reports calibration (ECE) and is what
+# should move these numbers. They are log-odds, not percentages: the
+# assess box squashes the weighted sum with a logistic into [0, 1].
+# groups is the largest positive term because two credible outlets are
+# the product's own bar and four is already a pile. agreement is next
+# so a named dissenter actually moves the score. A top-up, a second
+# search round, and unverified quotes pull it down: each one means the
+# table was thinner than the first pass wanted.
+CONFIDENCE_BIAS = -0.4
+CONFIDENCE_WEIGHTS = {
+    "groups": 1.8,
+    "tier": 0.8,
+    "agreement": 1.2,
+    "dated": 0.4,
+    "unverified": -0.8,
+    "topup": -0.4,
+    "rounds": -0.3,
+}
+# Confidence that the claim is unverifiable, not that it is false.
+# rounds and thin raise it: we used the search and we are still short
+# of two credible groups. A failed quote check lowers it.
+CONFIDENCE_UNVERIFIABLE_BIAS = 0.0
+CONFIDENCE_UNVERIFIABLE_WEIGHTS = {
+    "rounds": 1.1,
+    "thin": 1.3,
+    "topup": 0.3,
+    "unverified": -0.7,
+}
+# reuse_prior has no new table. The cosine is the match strength.
+# 0.85 (the exact threshold) lands lower than a near-copy at 0.96.
+CONFIDENCE_REUSE_BIAS = -2.2
+CONFIDENCE_REUSE_COSINE = 4.0

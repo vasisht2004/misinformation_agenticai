@@ -152,19 +152,54 @@ class Query(BaseModel):
 # for the top-up pages, and that is the last model call this box makes.
 _STANCE_LIMIT = 20
 _TOPUP_QUERIES = 2
+# One repair call, not one per row. Twenty is the same cap as the stance
+# call: past that, the prompt is a second claim. Core rows are sent first
+# because the verdict follows the core claim, and a not-checkable atomic
+# claim cannot spend this budget.
+_REPAIR_LIMIT = 20
+_REPAIR_PATH = Path(__file__).resolve().parent / "prompts" / "repair_v1.txt"
 # A page a year older than the claim cannot show that a "now" claim is
 # happening now. It can still refute the claim, which is why only a
-# support is cleared. A refute is never rewritten.
+# support is cleared. A refute is never rewritten. The relative-time
+# window below is a different rule: it clears both sides, and only for
+# "today" / "till Monday" claims.
 _OLD_EVENT_DAYS = 365
-# v7 is the stance prompt. Older versions stay on disk so a cached check
-# can still be read. v7 keeps every v6 rule and adds the share date,
-# cure/effect refutes, and the campus-versus-station example. A different
-# event (another line, scheme, year, or person) is neutral.
-_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "stance_v7.txt"
+# Frozen at v9. The stance-freeze comment in config.py is the rule:
+# a newer prompt needs a full regression on the hand-labelled rows.
+# v9 is v7 plus the myth-list rule. Older files stay on disk so a cached
+# check can still be read.
+_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "stance_v9.txt"
 _TOPUP_PATH = Path(__file__).resolve().parent / "prompts" / "topup_v1.txt"
 _CURRENT_CLAIM = re.compile(
     r"\b(?:now|new|permanently)\b|\bfrom\s+(?:\d{1,2}\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
     re.IGNORECASE,
+)
+# "till Monday" is this week. "from 1 December" and "from 2026" are a
+# named date, so they must not match: an old page can still refute those.
+_WEEKDAY = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+_RELATIVE_TIME = re.compile(
+    r"\b(?:today|tonight|tomorrow|yesterday)\b"
+    r"|\bthis\s+week\b|\bnext\s+week\b|\bthis\s+weekend\b"
+    r"|\b(?:till|until|from|on)\s+(?:(?:this|next)\s+)?" + _WEEKDAY + r"\b",
+    re.IGNORECASE,
+)
+# fetch.py's date_source labels when a publication day survived.
+# "untrusted" is the opposite and is not in this set.
+_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text"}
+# A neutral reason that already argues the claim is wrong. These rows
+# are the only ones sent to the repair pass. A cue does not relabel
+# the row by itself. The date window still runs after that pass, so a
+# repaired refute about another occasion does not survive.
+_REFUTE_CUES = (
+    "not a cure",
+    "no evidence",
+    "no significant",
+    "does not",
+    "myth",
+    "false",
+    "only temporary",
+    "only retail",
+    "small effect",
 )
 _SHINGLE = 5
 _MINHASH_PERM = 128
@@ -250,6 +285,47 @@ class AtomicStanceBatch(BaseModel):
     judgements: list[AtomicStanceJudgement] = Field(default_factory=list)
 
 
+class RepairJudgement(BaseModel):
+    """One neutral row, re-read because its reason already refuted the claim.
+
+    atomic_id is always present. A single claim is A1, the same id
+    apply_stance writes, so the repair can be matched without a second
+    schema for the one-claim path.
+    """
+
+    passage_id: str
+    atomic_id: str = "A1"
+    stance: Literal["supports", "refutes", "neutral"]
+    quote: str = ""
+    reason: str = ""
+
+    @field_validator("quote", "reason", "passage_id", "atomic_id", mode="before")
+    @classmethod
+    def _text(cls, value):
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("reason")
+    @classmethod
+    def _short_reason(cls, value):
+        return " ".join(value.split()[:20])
+
+    @field_validator("atomic_id")
+    @classmethod
+    def _id(cls, value):
+        text = " ".join(str(value).split())
+        # A missing id is the single-claim row. Failing the whole call
+        # would throw away every other repair in the batch.
+        return text or "A1"
+
+
+class RepairBatch(BaseModel):
+    """The repair call returns an object, the same shape as stance."""
+
+    judgements: list[RepairJudgement] = Field(default_factory=list)
+
+
 class TopupBatch(BaseModel):
     """At most two new queries. The code drops anything past the second."""
 
@@ -279,7 +355,9 @@ def investigate(state: dict) -> dict:
     already recorded in investigate_stats are skipped. One stance call
     reads the best passages. If fewer than two independent tier 1–2 groups
     support or refute, one top-up proposes at most two new queries and one
-    more stance call reads only the new passages. Tiers and groups are
+    more stance call reads only the new passages. A later call from the
+    gate does not top up: it only runs plan queries that have not been
+    used. Tiers and groups are
     rules. A search quota or a model error returns whatever is already in
     hand and a note. It does not raise: the gate is the box that says the
     check was not enough.
@@ -334,6 +412,14 @@ def investigate(state: dict) -> dict:
                     state.get("claim_date"),
                     _atomic_items(state),
                 )
+                # Repair first. The date window then clears a repaired
+                # refute that is about a different Monday, so the repair
+                # cannot put an old holiday notice back into evidence.
+                repair_unverified, repair_note = _repair_mismatches(state, labelled)
+                unverified += repair_unverified
+                if repair_note:
+                    notes.append(repair_note)
+                _apply_relative_window(state, labelled)
                 # The rows the model did not see are not part of this round.
                 # Keeping them would make the counts disagree with the call.
                 passages = chosen
@@ -342,9 +428,17 @@ def investigate(state: dict) -> dict:
     )
     topup_used = False
     topup_queries: list[str] = []
-    # A failed stance, or a search cap already hit, is not "thin evidence".
-    # Spending another call would only repeat the failure.
-    if not stance_failed and not search_failed and _strong_groups(evidence) < 2:
+    # Round 2 is the gate spending the plan's unused queries. The top-up
+    # is a first-round extra: two model-written queries when that plan
+    # came back thin. Running it again would search past the plan the
+    # gate authorised. A failed stance, or a search cap already hit, is
+    # also not "thin evidence".
+    if (
+        not prior_queries
+        and not stance_failed
+        and not search_failed
+        and _strong_groups(evidence) < 2
+    ):
         topup_used, extra_labelled, extra_passages, extra_pages, extra_queries, extra_unverified, topup_note = (
             _topup(state, labelled, passages, prior_queries + ran)
         )
@@ -353,6 +447,14 @@ def investigate(state: dict) -> dict:
         if topup_note:
             notes.append(topup_note)
         if extra_passages:
+            # Same order as the first pass: repair, then the date window.
+            # An old page found on the second query is the same different
+            # occasion as one found on the first.
+            repair_unverified, repair_note = _repair_mismatches(state, extra_labelled)
+            unverified += repair_unverified
+            if repair_note:
+                notes.append(repair_note)
+            _apply_relative_window(state, extra_labelled)
             labelled = labelled + extra_labelled
             passages = passages + extra_passages
             pages = pages + extra_pages
@@ -360,6 +462,9 @@ def investigate(state: dict) -> dict:
             evidence = build_evidence(
                 state, labelled, id_start=_next_evidence_id(prior_evidence), prior=prior_evidence
             )
+    # What is still neutral after the repair and the date window. A row
+    # the repair changed, or the window cleared, is no longer a mismatch.
+    _mark_reason_mismatches(labelled)
     stats = _stats(
         passages=passages,
         labelled=labelled,
@@ -466,25 +571,26 @@ def judge_stance(state: dict, passages: list[Passage]) -> StanceBatch | AtomicSt
     )
     schema = StanceBatch
     if multi:
-        # The file already holds every v6 rule. This paragraph only tells
-        # the model to apply that same text once per atomic claim. A
-        # one-claim call does not get it, so its schema stays the old one.
+        # The file already holds every v9 rule, including the myth list.
+        # This paragraph only tells the model to apply that same text once
+        # per atomic claim. A one-claim call does not get it, so its schema
+        # stays the old one.
         ids = ", ".join(item["id"] for item in items)
         prompt += (
             "\n\nThere is more than one atomic claim. Return one judgement "
             "for every passage and every atomic claim "
             f"({ids}), and set atomic_id to that claim's id. Apply every "
             "rule above to that atomic claim alone, including the share "
-            "date, the cure rule, and the named-place rule. A passage may "
-            "support one and be neutral about another. Do not require it "
-            "to confirm the other atomic claims.\n"
+            "date, the cure rule, the named-place rule, and the myth-list "
+            "rule. A passage may support one and be neutral about another. "
+            "Do not require it to confirm the other atomic claims.\n"
         )
         schema = AtomicStanceBatch
     return call_structured(
         prompt,
         schema,
         purpose="stance",
-        prompt_version="stance_v7",
+        prompt_version="stance_v9",
     )
 
 
@@ -811,6 +917,13 @@ def build_evidence(
                 "date_source": passage.date_source,
                 "age_days": _age_days(claim_date, passage.published_date),
                 "after_claim": passage.after_claim,
+                # Set when the repair pass moved this row off neutral.
+                # Empty when stance's own label survived.
+                "repaired_from": row.get("repaired_from") or "",
+                # True when this claim is relative-time and the page has
+                # no trusted day. The stance is kept. A dated page outside
+                # the window never reaches here: it was set to neutral.
+                "date_unknown": bool(row.get("date_unknown")),
                 "fetched": passage.fetched,
                 # The tier does not change when this is true. The gate can
                 # still see that the row is a snippet.
@@ -920,6 +1033,14 @@ def _stats(
         # True only when the stance call itself failed. Box 9 must read this
         # as "system error -> retry / human", never as "insufficient evidence".
         "stance_failed": bool(stance_failed),
+        # Neutrals whose reason still argues a refutation after the repair
+        # pass and the date window. The repair already had its one call.
+        "reason_label_mismatch": sum(
+            1 for row in labelled if row.get("reason_label_mismatch")
+        ),
+        # Rows the repair pass moved off neutral. The date window may
+        # have put one back; repaired_from stays so this count includes it.
+        "repaired": sum(1 for row in labelled if row.get("repaired_from") == "neutral"),
         # Groups that argue both sides. Box 9 (the gate) must count each of
         # these on neither side and flag the claim. The rows stay in evidence.
         "group_conflicts": _conflicting_groups(evidence, prior_evidence or []),
@@ -940,6 +1061,193 @@ def _old_event(claim: str, claim_date, passage: Passage) -> bool:
         return False
     age = _age_days(claim_date, passage.published_date)
     return age is not None and age >= _OLD_EVENT_DAYS
+
+
+def _relative_time_claim(state: dict) -> bool:
+    """True when the claim is about this week, not a named date.
+
+    "till Monday" and "today" move with the share date. "invalid from 1
+    December" and "banned from 2026" name the date, so an old page can
+    still refute them. time_clues is included because extract sometimes
+    parks "till Monday" there instead of repeating it in the claim line.
+    An atomic sentence is the same claim text.
+    """
+    parts = []
+    for key in ("claim", "time_clues"):
+        value = state.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value)
+    for item in _atomic_items(state):
+        parts.append(item["text"])
+    if not parts:
+        return False
+    return _RELATIVE_TIME.search("\n".join(parts)) is not None
+
+
+def _trusted_published(passage: Passage) -> str | None:
+    """The page's day, when we trust it. None when the day is unknown.
+
+    "untrusted" means the only dates on the page were today or in the
+    future, so that day is not a publication date. A bare ISO day with
+    no source is a date a person recorded on the row, and it counts.
+    """
+    source = passage.date_source
+    if source == "untrusted":
+        return None
+    if source and source not in _TRUSTED_DATE:
+        return None
+    parsed = _parse_date(passage.published_date)
+    if parsed is None:
+        return None
+    return parsed.isoformat()
+
+
+def _apply_relative_window(state: dict, labelled: list[dict]) -> None:
+    """Force a different occasion to neutral. Keep an undated page.
+
+    The stance prompt already says a different date is neutral. The model
+    labelled a December 2024 "no holiday" page as a refute of "schools
+    closed till Monday" shared in November 2026. This does not wait for
+    the next prompt: both a support and a refute outside the window
+    become neutral, with the reason "about a different date". A page
+    with no trusted day is kept, because dropping it would hide a source
+    that might be this week, and date_unknown says we could not place it.
+    A claim that is not relative-time is left alone, including its old
+    refutes. No claim date means the window cannot be placed, so dated
+    rows are kept too.
+    """
+    if not _relative_time_claim(state):
+        for row in labelled:
+            row["date_unknown"] = False
+        return
+    claim_date = state.get("claim_date") if isinstance(state.get("claim_date"), str) else None
+    window = int(config.RELATIVE_TIME_WINDOW_DAYS)
+    for row in labelled:
+        passage = row.get("passage")
+        if not isinstance(passage, Passage):
+            row["date_unknown"] = True
+            continue
+        published = _trusted_published(passage)
+        if published is None or claim_date is None:
+            # No day, or no share date to compare it with. The label stays.
+            row["date_unknown"] = published is None
+            continue
+        age = _age_days(claim_date, published)
+        if age is None:
+            row["date_unknown"] = True
+            continue
+        row["date_unknown"] = False
+        # Older than the fortnight, or any day after the claim. Same day
+        # and the fourteen days before it are this occasion.
+        if age > window or age < 0:
+            if row.get("stance") in {"supports", "refutes"}:
+                row["stance"] = "neutral"
+                row["reason"] = "about a different date"
+
+
+def _mark_reason_mismatches(labelled: list[dict]) -> None:
+    """Flag a neutral whose reason already refutes. Do not change the label.
+
+    The repair pass reads this flag. This function only sets it. A cue
+    is not a stance: the second call, and then the date window, decide
+    whether the row moves.
+    """
+    for row in labelled:
+        reason = str(row.get("reason") or "").casefold()
+        row["reason_label_mismatch"] = (
+            row.get("stance") == "neutral"
+            and any(cue in reason for cue in _REFUTE_CUES)
+        )
+
+
+def _repair_mismatches(state: dict, labelled: list[dict]) -> tuple[int, str]:
+    """One call for neutrals whose reason already refutes. Returns failures and a note.
+
+    No mismatched row means no call. At most twenty rows go in, core
+    claims first, because the verdict follows the core and the prompt
+    must stay one claim. A quote that is not in the passage leaves the
+    row neutral: the repair did not land. The caller runs the date
+    window after this, so a repaired row about another date is still
+    cleared. A model error keeps the stance labels. A quota error
+    propagates, the same way a stance quota does.
+    """
+    _mark_reason_mismatches(labelled)
+    queued = _repair_queue(state, labelled)
+    if not queued:
+        return 0, ""
+    prompt = _REPAIR_PATH.read_text(encoding="utf-8").replace("__ROWS__", _repair_block(state, queued))
+    try:
+        batch = call_structured(
+            prompt,
+            RepairBatch,
+            purpose="stance_repair",
+            prompt_version="repair_v1",
+        )
+    except LLMError as exc:
+        if isinstance(exc, LLMQuotaError):
+            raise
+        return 0, str(exc)
+    by_key = {(item.passage_id, item.atomic_id): item for item in batch.judgements}
+    unverified = 0
+    for row in queued:
+        passage = row.get("passage")
+        if not isinstance(passage, Passage):
+            continue
+        aid = str(row.get("atomic_id") or "A1")
+        judgement = by_key.get((passage.passage_id, aid))
+        if judgement is None:
+            continue
+        stance = judgement.stance
+        quote = judgement.quote or ""
+        if stance in {"supports", "refutes"} and not _quote_in_passage(quote, passage.text):
+            # The words are not on the page, so this is not evidence.
+            # The row stays the neutral stance came back with.
+            row["quote_unverified"] = True
+            unverified += 1
+            continue
+        if stance == "neutral" or stance == row.get("stance"):
+            continue
+        row["stance"] = stance
+        row["quote"] = quote
+        row["reason"] = judgement.reason or row.get("reason") or ""
+        row["repaired_from"] = "neutral"
+        row["quote_unverified"] = False
+    return unverified, ""
+
+
+def _repair_queue(state: dict, labelled: list[dict]) -> list[dict]:
+    """Mismatched neutrals, core claim first, capped at one repair prompt."""
+    core = {item["id"] for item in _atomic_items(state) if item["core"]}
+    ranked = []
+    for index, row in enumerate(labelled):
+        if row.get("stance") != "neutral" or not row.get("reason_label_mismatch"):
+            continue
+        aid = str(row.get("atomic_id") or "A1")
+        # No core mark means a single claim. Every row is that claim.
+        rank = 0 if (not core or aid in core) else 1
+        ranked.append((rank, index, row))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [row for _rank, _index, row in ranked[:_REPAIR_LIMIT]]
+
+
+def _repair_block(state: dict, rows: list[dict]) -> str:
+    """The claim, the atomic sentence, the passage, and the reason that disagreed."""
+    atomic = {item["id"]: item["text"] for item in _atomic_items(state)}
+    claim = _claim_text(state) or "(none)"
+    blocks = []
+    for row in rows:
+        passage = row["passage"]
+        aid = str(row.get("atomic_id") or "A1")
+        sentence = atomic.get(aid) or claim
+        blocks.append(
+            f"passage_id: {passage.passage_id}\n"
+            f"atomic_id: {aid}\n"
+            f"claim: {claim}\n"
+            f"atomic_claim: {sentence}\n"
+            f"reason: {row.get('reason') or ''}\n"
+            f"passage:\n{passage.text}"
+        )
+    return "\n\n".join(blocks)
 
 
 def _prior_queries(state: dict) -> list[str]:
@@ -1030,6 +1338,9 @@ def _stance_rows(labelled: list[dict]) -> list[dict]:
             "atomic_id": str(row.get("atomic_id") or "A1"),
             "stance": row.get("stance") or "",
             "reason": row.get("reason") or "",
+            "date_unknown": bool(row.get("date_unknown")),
+            "reason_label_mismatch": bool(row.get("reason_label_mismatch")),
+            "repaired_from": row.get("repaired_from") or "",
         })
     return rows
 
