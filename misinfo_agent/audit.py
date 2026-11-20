@@ -10,6 +10,11 @@ data/memory_additions.parquet for the next memory rebuild. The live
 index is not modified. Rebuilding is a separate step; writing into the
 index from a review would change what the next claim can match before
 anyone has checked the addition.
+
+pending_reviews is the other table in this file. Box 13 writes it when
+a run pauses and deletes it when a person answers. This box does not.
+A paused run is not a finished verdict, and listing it here would make
+History show a decision that had not been accepted.
 """
 
 from __future__ import annotations
@@ -182,3 +187,31 @@ def _insert(path: Path, record: dict) -> None:
             f"INSERT OR REPLACE INTO runs ({', '.join(_COLUMNS)}) VALUES ({', '.join('?' for _ in _COLUMNS)})",
             [payload.get(column) for column in _COLUMNS],
         )
+
+
+def list_runs(db_path: Path | str | None = None) -> list[dict]:
+    """Finished runs, newest first.
+
+    created_at is seconds, so two runs in the same second would tie.
+    rowid is the insert order, and the later insert is the later run.
+    Reading History does not create the database.
+    """
+    path = Path(db_path) if db_path else config.DATA_DIR / "audit.db"
+    if not path.exists():
+        return []
+    with sqlite3.connect(path) as conn:
+        found = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'"
+        ).fetchone()
+        if not found:
+            return []
+        conn.row_factory = sqlite3.Row
+        queried = conn.execute(
+            """
+            SELECT created_at, claim, verdict, confidence, decision,
+                   human_action, llm_calls, latency_s, run_id
+            FROM runs
+            ORDER BY created_at DESC, rowid DESC
+            """
+        )
+        return [dict(row) for row in queried.fetchall()]

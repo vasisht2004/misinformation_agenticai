@@ -58,7 +58,16 @@ def build_graph(
     builder.add_node("assess", _guard("assess", _assess))
     builder.add_node("priority", _guard("priority", _priority))
     builder.add_node("decide", _guard("decide", _decide))
-    builder.add_node("review", _guard("review", _review))
+
+    def _review_node(state: dict) -> dict:
+        # The queue lives in the audit file. Tests pass a temp path into
+        # this builder. review() must use that path: its own default is
+        # data/audit.db, and a test would then write the real queue.
+        from misinfo_agent.review import review
+
+        return review(state, db_path=audit_db)
+
+    builder.add_node("review", _guard("review", _review_node))
     builder.add_node("output", _guard("output", _output))
     builder.add_node("audit", _guard("audit", lambda state: _audit(state, audit_db, additions)))
 
@@ -142,6 +151,29 @@ def run_pipeline(
         "result": values.get("result") or {},
         "audit": values.get("audit") or {},
     }
+
+
+def paused_review(
+    thread_id: str,
+    *,
+    checkpoint_path: Path | str | None = None,
+    audit_path: Path | str | None = None,
+) -> dict:
+    """The interrupt summary for one paused thread. Empty if it is not waiting.
+
+    The queue table names who is waiting. It does not copy every quote.
+    The evidence a reviewer reads is this summary, which the checkpointer
+    kept when interrupt() parked the run. A missing thread is an empty
+    dict, not an error: the queue row can outlive a checkpoint that was
+    deleted by hand, and the page still has the claim and the reason.
+    """
+    graph = build_graph(checkpoint_path, audit_path)
+    snap = graph.get_state({"configurable": {"thread_id": thread_id}})
+    for item in getattr(snap, "interrupts", ()) or ():
+        value = getattr(item, "value", None)
+        if isinstance(value, dict):
+            return value
+    return {}
 
 
 def _saver(path: Path) -> SqliteSaver:
@@ -295,11 +327,6 @@ def _priority(state: dict) -> dict:
 def _decide(state: dict) -> dict:
     from misinfo_agent.decide import decide
     return decide(state)
-
-
-def _review(state: dict) -> dict:
-    from misinfo_agent.review import review
-    return review(state)
 
 
 def _output(state: dict) -> dict:

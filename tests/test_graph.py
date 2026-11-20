@@ -219,6 +219,15 @@ def test_refuted_claim_is_stored(offline, monkeypatch, tmp_path):
     assert out["result"]["verdict"] == "False"
     assert out["result"]["decision"] == "store"
     assert out["result"]["human_action"] == ""
+    assert out["result"]["run_id"] == "store"
+    assert "llm_calls" in out["result"]["cost"]
+    assert "searches" in out["result"]["cost"]
+    assert isinstance(out["result"]["queries"], list)
+    assert any(row.get("stance") == "refutes" for row in out["result"]["evidence"])
+    assert any(part.get("core") for part in out["result"]["parts"])
+    # A stored run never paused, so it must not sit in the review queue.
+    from misinfo_agent.review import list_pending
+    assert list_pending(tmp_path / "audit.db") == []
     assert len(_audit_rows(tmp_path)) == 1
 
 
@@ -372,3 +381,39 @@ def test_checkpoint_resumes_on_a_new_graph(offline, monkeypatch, tmp_path):
     assert done["status"] == "done"
     assert done["result"]["human_action"] == "approve"
     assert len(_audit_rows(tmp_path)) == 1
+
+
+def test_pending_review_is_written_on_interrupt_and_removed_on_resume(offline, monkeypatch, tmp_path):
+    """The queue is the pause. Resume takes the row out before the card is stored."""
+    pages = [
+        _page("https://www.rbi.org.in/notice", "ALPHA", "supports"),
+        _page("https://pib.gov.in/press", "BETA", "refutes"),
+    ]
+    _install(monkeypatch, pages=pages)
+    paused = _run(tmp_path, f"{SECRET} {CLAIM}", thread_id="queue")
+    assert paused["status"] == "interrupt"
+    from misinfo_agent.graph import paused_review
+    from misinfo_agent.review import list_pending
+
+    rows = list_pending(tmp_path / "audit.db")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["thread_id"] == "queue"
+    assert row["claim"] == CLAIM
+    assert row["reason"]
+    assert row["priority"] in {"High", "Medium", "Low"}
+    assert row["provisional_verdict"] is None
+    assert isinstance(row["confidence"], float)
+    assert SECRET not in json.dumps(row)
+    payload = paused_review(
+        "queue",
+        checkpoint_path=tmp_path / "checkpoints.db",
+        audit_path=tmp_path / "audit.db",
+    )
+    assert payload.get("claim") == CLAIM
+    assert payload.get("evidence")
+    done = run_pipeline(resume={"action": "approve"}, thread_id="queue", **_paths(tmp_path))
+    assert done["status"] == "done"
+    assert done["result"]["human_action"] == "approve"
+    assert list_pending(tmp_path / "audit.db") == []
+    assert _audit_rows(tmp_path)[0]["human_action"] == "approve"
