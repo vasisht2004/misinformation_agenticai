@@ -264,6 +264,26 @@ class ClaimState(TypedDict, total=False):
     p_star: float
     # Box 13. Reviewer action once a paused run resumes. Empty until then.
     human: dict
+    # Box 13. approve, edit, reject, or more_evidence. Empty until resume.
+    # Kept beside `human` so the card and the audit row can read one field.
+    human_action: str
+    # Box 13. True when the reviewer replaced the verdict or the correction.
+    # An approval leaves the evidence verdict as it was.
+    human_edited: bool
+    # Box 13. The reviewer's note. A rejection writes the fixed reason here
+    # as well, so the card does not have to reconstruct it.
+    note: str
+    # Any node. One dict per caught failure: the node name and the
+    # exception type. A quota error is not recorded here; it stops the
+    # run. operator.add so a later failure appends instead of erasing
+    # the first one.
+    errors: Annotated[list, operator.add]
+    # Boxes 14–15. The card a person sees. The audit box stores a row
+    # about the run; it does not rebuild this card.
+    result: dict
 
+    # Box 16. Counters captured when the run started, so the audit row
+    # counts this run and not every earlier call in the process.
+    run_marks: dict
     # Box 16. One audit record: models, prompt version, call counts, latency.
     audit: dict

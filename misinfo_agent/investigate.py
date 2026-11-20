@@ -22,6 +22,7 @@ is not a language-model call, and it is loaded once per process.
 
 from __future__ import annotations
 
+import csv
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -721,10 +722,52 @@ def _content_words(text: str) -> list[str]:
 def credibility_tier(url: str) -> int:
     """1 official, 2 newsroom or journal, 3 other organisation, 4 the rest.
 
-    The tier is the source. A snippet from a ministry is still tier 1;
-    snippet_only on the row says we did not open the page.
+    The tier is the source. This function does not read snippet_only.
+    A ministry snippet is still tier 1; the row's flag only says we did
+    not open the page.
+
+    Curated lists are decided first, and they win over Wikipedia's
+    perennial-source table. That table is a summary of editing
+    discussions, useful for a newsroom we have not classed, and it is
+    not allowed to demote PIB or The Hindu or to promote a host we
+    already called a blog.
+
+    Order, and why this order:
+    1. Curated tier 1. A government suffix or an office we already route
+       to is the body that can issue the order. RSP does not discuss
+       most of those hosts, and must not outrank one it does.
+    2. Curated tier 4 hosts, then the curated tier 2 list (Indian wires
+       and papers, other named newsrooms and journals, and .edu / .ac.
+       suffixes). The blog list is before tier 2 so a host we named as
+       anyone-can-publish is not rescued by a news suffix.
+    3. Curated tier 3: Wikipedia, hospitals, NGOs, smaller papers we
+       already classed. Still our decision, still ahead of RSP.
+    4. WP:RSP, by registrable domain. A www host and the bare domain are
+       one source. A listed host that is not itself the registrable
+       domain (abcnews.go.com) matches that host, not the shared parent.
+    5. Default 4. An unknown blog stays here.
     """
     domain = _source_domain(url)
+    curated = _curated_tier(domain)
+    if curated is not None:
+        return curated
+    found = _rsp_tier(site_host(url) or domain, domain)
+    if found is not None:
+        return found
+    return 4
+
+
+def curated_tier(url: str) -> int | None:
+    """The tier from our lists only. None means those lists do not name this host.
+
+    RSP is not consulted. None is what later falls through to the
+    perennial-source table and then to the default of tier 4. The build
+    script uses this to count domains RSP actually added.
+    """
+    return _curated_tier(_source_domain(url))
+
+
+def _curated_tier(domain: str) -> int | None:
     if _is_tier1(domain):
         return 1
     # A blog is not promoted by also matching a news suffix we do not have.
@@ -734,7 +777,57 @@ def credibility_tier(url: str) -> int:
         return 2
     if _is_tier3(domain):
         return 3
-    return 4
+    return None
+
+
+# Loaded once. The file is built by scripts/build_source_tiers.py and is
+# not in git. A missing file means "RSP not installed", which is the
+# default of tier 4, not an error in the middle of a check.
+_RSP_TABLE: dict[str, int] | None = None
+
+
+def _rsp_table() -> dict[str, int]:
+    global _RSP_TABLE
+    if _RSP_TABLE is not None:
+        return _RSP_TABLE
+    path = config.DATA_DIR / "source_tiers_rsp.csv"
+    table: dict[str, int] = {}
+    if path.is_file():
+        # The tier column is the mapped number. rsp_status is kept in the
+        # file so a person can see why a domain landed on that number.
+        with path.open(encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                domain = (row.get("domain") or "").strip().lower()
+                try:
+                    tier = int(row.get("tier") or "")
+                except ValueError:
+                    continue
+                if domain and tier in {2, 3, 4}:
+                    table[domain] = tier
+    _RSP_TABLE = table
+    return table
+
+
+def _rsp_tier(host: str, domain: str) -> int | None:
+    """RSP tier for this host, or None when the table does not list it.
+
+    Longest listed suffix wins, so abcnews.go.com uses the row for that
+    host and not a row that named the parent go.com. The registrable
+    domain is the fallback: www and the bare domain are one publication.
+    """
+    table = _rsp_table()
+    if not table or not host:
+        return None
+    best = None
+    best_len = -1
+    for listed, tier in table.items():
+        if host == listed or host.endswith("." + listed):
+            if len(listed) > best_len:
+                best = tier
+                best_len = len(listed)
+    if best is not None:
+        return best
+    return table.get(domain)
 
 
 def _source_domain(url: str) -> str:
