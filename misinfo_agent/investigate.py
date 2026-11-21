@@ -23,6 +23,7 @@ is not a language-model call, and it is loaded once per process.
 from __future__ import annotations
 
 import csv
+import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -35,7 +36,7 @@ import numpy as np
 from pydantic import BaseModel, Field, field_validator
 
 import misinfo_agent.config as config
-from misinfo_agent.fetch import Page, date_missing, fetch_pages, remember_publication
+from misinfo_agent.fetch import Page, date_missing, fetch_pages, is_circulation, remember_publication
 from misinfo_agent.llm import LLMError, LLMQuotaError, call_structured, get_usage
 from misinfo_agent.memory import get_encoder
 from misinfo_agent.search import (
@@ -44,11 +45,14 @@ from misinfo_agent.search import (
     SearchQuotaError,
     factcheck_blocked,
     get_search_usage,
+    looks_like_factcheck,
     registrable_domain,
     reset_claim_searches,
     search,
     site_host,
 )
+
+_log = logging.getLogger(__name__)
 
 # A checkable claim is one sentence. Twenty words keeps a long one from
 # becoming a query that only matches the forward itself. Most claims are
@@ -74,6 +78,12 @@ _PLAN_CAP = 6
 # Asking for more would fetch pages the cap throws away.
 _RESULTS_PER_QUERY = 5
 _MAX_HITS = 25
+# The allowed eval's fact-check pages have their own fetches. Eight is
+# enough to read the desks that wrote about the rumour, and it is not
+# taken out of the twelve slots the news pages already used. Sharing
+# those slots is what made the allowed run drop the pages the blocked
+# run had decided on.
+_FACTCHECK_FETCHES = 8
 # Each line of the plan keeps its best three before the overall cap.
 # Five lines times three is 15, so the reserve fits inside 25 and the
 # rest of the slots fill by score. Without this, one strong query fills
@@ -351,6 +361,34 @@ class TopupBatch(BaseModel):
 def investigate(state: dict) -> dict:
     """Search, read, and label. Returns passages, evidence, and the counts.
 
+    An allowed eval is the blocked search plus a fact-check budget. The
+    news search runs with the block on, so it reads the cached blocked
+    queries and keeps those pages. The extra budget then keeps only
+    fact-check hits, in their own fetch slots, with the phrase rule off.
+    It can add a row. It does not drop a row the news search kept.
+    """
+    if _eval_sites(state) != "allowed":
+        return _investigate_once(state)
+    saved = config.BLOCK_FACTCHECK_SITES
+    try:
+        # On for this half only. An open search of the same words is a
+        # different result list, and the fact-check URLs in it take the
+        # twenty-five hit slots and the twelve fetches. That is why the
+        # allowed run abstained on claims the blocked run had decided.
+        config.BLOCK_FACTCHECK_SITES = True
+        blocked = _investigate_once(state)
+    finally:
+        config.BLOCK_FACTCHECK_SITES = saved
+    # A gate round already has the fact-check rows from the first call.
+    # Running the budget again would search the same plan twice.
+    if _prior_queries(state):
+        return blocked
+    return _append_factchecks(state, blocked)
+
+
+def _investigate_once(state: dict) -> dict:
+    """Search, read, and label. Returns passages, evidence, and the counts.
+
     A new claim resets the per-claim search budget. A second call from the
     gate does not: that budget is for the whole claim, and the queries
     already recorded in investigate_stats are skipped. One stance call
@@ -381,14 +419,23 @@ def investigate(state: dict) -> dict:
     ran: list[str] = []
     stance_failed = False
     search_failed = False
+    search_capped = None
     try:
         bundle = gather_passages(state, skip_queries=prior_queries)
         pages = bundle["pages"]
         passages = list(bundle["passages"])
         ran.extend(bundle["queries"])
+        search_capped = bundle.get("search_capped")
+        for reason in bundle.get("cap_reasons") or []:
+            notes.append(reason)
+        if search_capped:
+            # The queries that finished before the cap still have pages.
+            # Stance reads those. The note is what the audit and the card show.
+            notes.append(f"search_capped={search_capped}")
     except SearchQuotaError as exc:
         notes.append(str(exc))
         search_failed = True
+        search_capped = getattr(exc, "cap", None) or search_capped
     else:
         chosen = passages[:_STANCE_LIMIT]
         if chosen:
@@ -447,6 +494,10 @@ def investigate(state: dict) -> dict:
         ran.extend(extra_queries)
         if topup_note:
             notes.append(topup_note)
+            if search_capped is None and "search_capped=" in topup_note:
+                search_capped = topup_note.split("search_capped=")[-1].split()[0]
+                if search_capped not in {"per_claim", "monthly"}:
+                    search_capped = None
         if extra_passages:
             # Same order as the first pass: repair, then the date window.
             # An old page found on the second query is the same different
@@ -482,12 +533,260 @@ def investigate(state: dict) -> dict:
         topup_queries=topup_queries,
         stance_failed=stance_failed,
         prior_evidence=prior_evidence,
+        search_capped=search_capped,
     )
     return {
         "passages": [passage.model_dump(mode="json") for passage in passages],
         "evidence": evidence,
         "investigate_stats": stats,
     }
+
+
+def _eval_sites(state: dict) -> str:
+    """The eval condition stored on the run, or empty for a normal check."""
+    marks = state.get("run_marks")
+    if not isinstance(marks, dict):
+        return ""
+    return str(marks.get("eval_sites") or "")
+
+
+def _append_factchecks(state: dict, blocked: dict) -> dict:
+    """Add fact-check rows. The blocked rows in `blocked` stay as they are.
+
+    The block flag is off for this budget, which is what turns the phrase
+    rule off: a fact-check opened on purpose is evidence, not the answer
+    key. The flag is put back afterwards so a later claim still sees the
+    setting the caller chose.
+    """
+    saved = config.BLOCK_FACTCHECK_SITES
+    config.BLOCK_FACTCHECK_SITES = False
+    try:
+        extra = _factcheck_budget(state, blocked)
+    finally:
+        config.BLOCK_FACTCHECK_SITES = saved
+    return _merge_factchecks(blocked, extra)
+
+
+def _factcheck_budget(state: dict, blocked: dict) -> dict:
+    """The fact-check half. News hits are not candidates here.
+
+    A quota on the model stops the claim, the same way the news stance
+    does. A search cap returns the news rows already in hand. After-claim
+    pages are dropped by the same date rule as the news search. The
+    count reported is pages, which is what that rule removes before a
+    passage can be kept.
+    """
+    search_mark = len(get_search_usage())
+    llm_mark = len(get_usage())
+    known = _known_urls(blocked)
+    ran: list[str] = []
+    note = ""
+    hits: list[Hit] = []
+    held: list[str] = []
+    usage_mark = len(get_search_usage())
+    try:
+        hits = gather_factcheck_hits(state, known_urls=known, ran=ran, capped=held)
+    except SearchQuotaError as exc:
+        note = str(exc)
+        _remember_cap(held, getattr(exc, "cap", None))
+    fc_usage = get_search_usage()[usage_mark:]
+    fc_misses = sum(1 for row in fc_usage if row.get("cache_miss"))
+    fc_cached = sum(1 for row in fc_usage if row.get("cached"))
+    pages = fetch_pages(hits) if hits else []
+    pages = [
+        page
+        for page in pages
+        if not _is_banned_page(page.url, _submitted_page(state), _eval_exclude_urls(state))
+    ]
+    claim_date = state.get("claim_date")
+    after_claim_pages = {
+        canonical_url(page.url)
+        for page in pages
+        if looks_like_factcheck(page.url, page.title)
+        and _after_claim(page.published_date, claim_date) is True
+    }
+    passages, _cosines, _slots = select_passages(state, pages) if pages else ([], [], 0)
+    finished = finish_passages(
+        state, passages, deadline=time.monotonic() + config.CLAIM_BUDGET_S
+    )
+    # A date read after ranking can put the page past the claim. When
+    # undated passages are kept, every URL that left here left because
+    # of that date.
+    if finished["dropped_after_claim"] and not finished["dropped_undated"]:
+        before = {canonical_url(passage.url) for passage in passages}
+        after = {canonical_url(passage.url) for passage in finished["passages"]}
+        after_claim_pages.update(before - after)
+    kept = _renumber(
+        list(finished["passages"])[:_STANCE_LIMIT],
+        start=len(blocked.get("passages") or []) + 1,
+    )
+    labelled: list[dict] = []
+    supports = refutes = neutral = 0
+    if kept:
+        try:
+            batch = judge_stance(state, kept)
+        except LLMError as exc:
+            if isinstance(exc, LLMQuotaError):
+                raise
+            note = str(exc)
+        else:
+            labelled, _unverified = apply_stance(
+                _claim_text(state),
+                kept,
+                batch.judgements,
+                state.get("claim_date"),
+                _atomic_items(state),
+            )
+            _repair_unverified, repair_note = _repair_mismatches(state, labelled)
+            if repair_note:
+                note = repair_note
+            _apply_relative_window(state, labelled)
+            supports = sum(1 for row in labelled if row["stance"] == "supports")
+            refutes = sum(1 for row in labelled if row["stance"] == "refutes")
+            neutral = sum(1 for row in labelled if row["stance"] == "neutral")
+    prior = blocked.get("evidence") if isinstance(blocked.get("evidence"), list) else []
+    evidence = (
+        build_evidence(state, labelled, id_start=_next_evidence_id(prior), prior=prior)
+        if labelled
+        else []
+    )
+    return {
+        "passages": [passage.model_dump(mode="json") for passage in kept],
+        "evidence": evidence,
+        "queries": ran,
+        "note": note,
+        "searches": len(get_search_usage()) - search_mark,
+        "llm_calls": len(get_usage()) - llm_mark,
+        "factcheck_after_claim": len(after_claim_pages),
+        "factcheck_fetches": len(hits),
+        "factcheck_pages_added": len({
+            canonical_url(passage.url)
+            for passage in kept
+            if looks_like_factcheck(passage.url, passage.title)
+        }),
+        "factcheck_cache_hits": fc_cached,
+        "factcheck_cache_misses": fc_misses,
+        "search_capped": _cap_value(held),
+        "n_supports": supports,
+        "n_refutes": refutes,
+        "n_neutral": neutral,
+    }
+
+
+def _known_urls(blocked: dict) -> set[str]:
+    """Pages the news search already kept. The budget must not stance them again."""
+    found = set()
+    for passage in blocked.get("passages") or []:
+        url = passage.get("url") if isinstance(passage, dict) else ""
+        key = canonical_url(url)
+        if key:
+            found.add(key)
+    for row in blocked.get("evidence") or []:
+        if isinstance(row, dict):
+            key = canonical_url(str(row.get("url") or ""))
+            if key:
+                found.add(key)
+    return found
+
+
+def _merge_factchecks(blocked: dict, extra: dict) -> dict:
+    """Blocked rows first, then the new fact-check rows. Nothing is removed."""
+    stats = dict(blocked.get("investigate_stats") or {})
+    notes = list(stats.get("notes") or [])
+    if extra.get("note"):
+        notes.append(extra["note"])
+    stats["notes"] = notes
+    stats["searches"] = int(stats.get("searches") or 0) + int(extra.get("searches") or 0)
+    stats["llm_calls"] = int(stats.get("llm_calls") or 0) + int(extra.get("llm_calls") or 0)
+    stats["n_supports"] = int(stats.get("n_supports") or 0) + int(extra.get("n_supports") or 0)
+    stats["n_refutes"] = int(stats.get("n_refutes") or 0) + int(extra.get("n_refutes") or 0)
+    stats["n_neutral"] = int(stats.get("n_neutral") or 0) + int(extra.get("n_neutral") or 0)
+    stats["queries"] = _merge_queries(list(stats.get("queries") or []), list(extra.get("queries") or []))
+    # Pages the date rule removed from the fact-check budget. The news
+    # search has its own drop count; this one is only the added desks.
+    stats["factcheck_after_claim"] = int(extra.get("factcheck_after_claim") or 0)
+    stats["factcheck_fetches"] = int(extra.get("factcheck_fetches") or 0)
+    stats["factcheck_pages_added"] = int(extra.get("factcheck_pages_added") or 0)
+    stats["factcheck_cache_hits"] = int(extra.get("factcheck_cache_hits") or 0)
+    stats["factcheck_cache_misses"] = int(extra.get("factcheck_cache_misses") or 0)
+    stats["search_capped"] = _prefer_cap(stats.get("search_capped"), extra.get("search_capped"))
+    if extra.get("search_capped") and f"search_capped={extra['search_capped']}" not in notes:
+        notes.append(f"search_capped={extra['search_capped']}")
+        stats["notes"] = notes
+    passages = list(blocked.get("passages") or []) + list(extra.get("passages") or [])
+    evidence = list(blocked.get("evidence") or []) + list(extra.get("evidence") or [])
+    stats["n_passages"] = len(passages)
+    support_groups = {row.get("group_id") for row in evidence if row.get("stance") == "supports"}
+    refute_groups = {row.get("group_id") for row in evidence if row.get("stance") == "refutes"}
+    stats["groups_supporting"] = len(support_groups)
+    stats["groups_refuting"] = len(refute_groups)
+    return {
+        "passages": passages,
+        "evidence": evidence,
+        "investigate_stats": stats,
+    }
+
+
+def gather_factcheck_hits(
+    state: dict,
+    *,
+    known_urls: set[str] | None = None,
+    ran: list[str] | None = None,
+    capped: list | None = None,
+) -> list[Hit]:
+    """Fact-check pages from the plan, capped at their own fetch budget.
+
+    The block flag has to be off, or search() would return the cached
+    list that already had these hosts removed. News hits are discarded
+    before the cap, so they cannot take a slot. The source article is
+    dropped by its canonical URL: another path on that host is a
+    different page and stays. At most eight pages are returned, which
+    is the number fetch will open.
+    """
+    known = known_urls or set()
+    queries = build_queries(state)
+    end_date = None
+    if config.EVAL_DROP_AFTER_CLAIM:
+        end_date = _search_end_date(state.get("claim_date"))
+    batches = _run_queries(queries, end_date, ran, capped)
+    submitted = _submitted_page(state)
+    banned = _eval_exclude_urls(state)
+    found: dict[str, dict] = {}
+    for query, hits in batches:
+        for hit in hits:
+            if not looks_like_factcheck(hit.url, hit.title):
+                continue
+            key = canonical_url(hit.url)
+            if not key or key in known:
+                continue
+            if _is_banned_page(key, submitted, banned):
+                continue
+            slot = found.get(key)
+            if slot is None:
+                found[key] = {"hit": hit, "kinds": [query.kind], "score": hit.score}
+                continue
+            if query.kind not in slot["kinds"]:
+                slot["kinds"].append(query.kind)
+            if hit.score > slot["score"]:
+                slot["hit"] = hit
+                slot["score"] = hit.score
+    ranked = sorted(found, key=lambda key: (-found[key]["score"], key))
+    chosen = []
+    for key in ranked:
+        # A social post is a sighting. It does not spend one of the eight
+        # fetches, and it is not a page this budget was added to read.
+        if is_circulation(key):
+            continue
+        chosen.append(key)
+        if len(chosen) >= _FACTCHECK_FETCHES:
+            break
+    kept = []
+    for key in chosen:
+        slot = found[key]
+        kept.append(
+            slot["hit"].model_copy(update={"url": key, "query_kinds": list(slot["kinds"])})
+        )
+    return kept
 
 
 def _atomic_items(state: dict) -> list[dict]:
@@ -747,6 +1046,10 @@ def credibility_tier(url: str) -> int:
        domain (abcnews.go.com) matches that host, not the shared parent.
     5. Default 4. An unknown blog stays here.
     """
+    # First lookup loads the RSP file. A missing file warns once inside
+    # that loader and leaves an empty table; the curated lists below
+    # still decide, which is what a machine without the file should do.
+    _rsp_table()
     domain = _source_domain(url)
     curated = _curated_tier(domain)
     if curated is not None:
@@ -781,29 +1084,41 @@ def _curated_tier(domain: str) -> int | None:
 
 
 # Loaded once. The file is built by scripts/build_source_tiers.py and is
-# not in git. A missing file means "RSP not installed", which is the
-# default of tier 4, not an error in the middle of a check.
+# not in git. A missing file means "RSP not installed". Curated lists
+# still apply. An unknown host stays tier 4. That is not an error in
+# the middle of a check, but it is easy to miss, so the first lookup
+# says so out loud and every later lookup stays quiet.
 _RSP_TABLE: dict[str, int] | None = None
+_RSP_WARNED = False
 
 
 def _rsp_table() -> dict[str, int]:
-    global _RSP_TABLE
+    global _RSP_TABLE, _RSP_WARNED
     if _RSP_TABLE is not None:
         return _RSP_TABLE
     path = config.DATA_DIR / "source_tiers_rsp.csv"
     table: dict[str, int] = {}
-    if path.is_file():
-        # The tier column is the mapped number. rsp_status is kept in the
-        # file so a person can see why a domain landed on that number.
-        with path.open(encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle):
-                domain = (row.get("domain") or "").strip().lower()
-                try:
-                    tier = int(row.get("tier") or "")
-                except ValueError:
-                    continue
-                if domain and tier in {2, 3, 4}:
-                    table[domain] = tier
+    if not path.is_file():
+        if not _RSP_WARNED:
+            _RSP_WARNED = True
+            _log.warning(
+                "%s is missing; source credibility is using the curated lists only. "
+                "Build the file with: python scripts/build_source_tiers.py",
+                path,
+            )
+        _RSP_TABLE = table
+        return table
+    # The tier column is the mapped number. rsp_status is kept in the
+    # file so a person can see why a domain landed on that number.
+    with path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            domain = (row.get("domain") or "").strip().lower()
+            try:
+                tier = int(row.get("tier") or "")
+            except ValueError:
+                continue
+            if domain and tier in {2, 3, 4}:
+                table[domain] = tier
     _RSP_TABLE = table
     return table
 
@@ -985,10 +1300,11 @@ def build_evidence(
         if row["stance"] not in {"supports", "refutes"}:
             continue
         passage = row["passage"]
-        # The page the person submitted cannot be evidence for itself.
-        # A search hit of that same URL is dropped earlier; this is the
-        # backstop for a row that arrived another way.
-        if _is_submitted_page(state, passage.url):
+        # The page the person submitted, and the eval's source article,
+        # cannot be evidence for themselves. A search hit of that URL is
+        # dropped earlier; this is the backstop for a row that arrived
+        # another way.
+        if _is_banned_page(passage.url, _submitted_page(state), _eval_exclude_urls(state)):
             continue
         rows.append(
             {
@@ -1091,6 +1407,7 @@ def _stats(
     topup_queries,
     stance_failed=False,
     prior_evidence=None,
+    search_capped=None,
 ) -> dict:
     supports = sum(1 for row in labelled if row["stance"] == "supports")
     refutes = sum(1 for row in labelled if row["stance"] == "refutes")
@@ -1126,6 +1443,9 @@ def _stats(
         # True only when the stance call itself failed. Box 9 must read this
         # as "system error -> retry / human", never as "insufficient evidence".
         "stance_failed": bool(stance_failed),
+        # None when every search that was started came back. per_claim or
+        # monthly when a later query was refused and the earlier pages were kept.
+        "search_capped": search_capped if search_capped in {"per_claim", "monthly"} else None,
         # Neutrals whose reason still argues a refutation after the repair
         # pass and the date window. The repair already had its one call.
         "reason_label_mismatch": sum(
@@ -1480,11 +1800,14 @@ def _topup(state, labelled, passages, already):
         bundle = gather_passages(state, extra_queries=fresh, known_urls=known)
     except SearchQuotaError as exc:
         return True, [], [], [], [], 0, str(exc)
+    cap_note = ""
+    if bundle.get("search_capped"):
+        cap_note = f"search_capped={bundle['search_capped']}"
     # Continue the ids. Reusing P1 makes the group map overwrite the first pass.
     chosen = _renumber(list(bundle["passages"])[:_STANCE_LIMIT], start=len(passages) + 1)
     ran = list(bundle["queries"])
     if not chosen:
-        return True, [], [], bundle["pages"], ran, 0, ""
+        return True, [], [], bundle["pages"], ran, 0, cap_note
     try:
         batch = judge_stance(state, chosen)
     except LLMError as exc:
@@ -1498,7 +1821,8 @@ def _topup(state, labelled, passages, already):
         state.get("claim_date"),
         _atomic_items(state),
     )
-    return True, extra_labelled, chosen, bundle["pages"], ran, unverified, note
+    joined = " ".join(part for part in (note, cap_note) if part)
+    return True, extra_labelled, chosen, bundle["pages"], ran, unverified, joined
 
 
 def propose_topup(state: dict, labelled: list[dict], already: list[str]) -> TopupBatch:
@@ -1724,6 +2048,8 @@ def gather_candidates(
     skip_queries: list[str] | None = None,
     extra_queries: list[str] | None = None,
     ran: list[str] | None = None,
+    capped: list | None = None,
+    cap_reasons: list | None = None,
 ) -> list[Hit]:
     """Run the plan and return the best unique pages.
 
@@ -1762,7 +2088,7 @@ def gather_candidates(
     else:
         skip = {_norm_query(item) for item in (skip_queries or [])}
         queries = [query for query in queries if _norm_query(query.text) not in skip]
-    batches = _run_queries(queries, end_date, ran)
+    batches = _run_queries(queries, end_date, ran, capped, cap_reasons)
     submitted = _submitted_page(state)
     for query, hits in batches:
         for hit in hits:
@@ -1770,7 +2096,9 @@ def gather_candidates(
             if not key:
                 continue
             # The article the person pasted is not a source for itself.
-            if submitted and _same_page(key, submitted):
+            # The eval's own source article is the same kind of leak, and
+            # it is not the page they pasted: the input is the claim text.
+            if _is_banned_page(key, submitted, _eval_exclude_urls(state)):
                 continue
             slot = found.get(key)
             if slot is None:
@@ -1817,12 +2145,23 @@ def _search_end_date(claim_date) -> str | None:
 
 
 def _run_queries(
-    queries: list[Query], end_date: str | None = None, ran: list[str] | None = None
+    queries: list[Query],
+    end_date: str | None = None,
+    ran: list[str] | None = None,
+    capped: list | None = None,
+    cap_reasons: list | None = None,
 ) -> list[tuple[Query, list[Hit]]]:
     if not queries:
         return []
+    # Once one line hits a cap, later lines are not started. Lines already
+    # in flight still finish, and their hits are kept. Raising out of the
+    # pool used to throw those pages away with the query that was refused.
+    stop = False
 
     def run(query: Query):
+        nonlocal stop
+        if stop:
+            return query, []
         # The kind is in the purpose because the usage row has no kind
         # field of its own, and box 16 already stores purpose.
         # A failed line is a miss. The other lines still stand. The quota
@@ -1836,8 +2175,12 @@ def _run_queries(
                 include_domains=query.include_domains,
                 end_date=end_date,
             )
-        except SearchQuotaError:
-            raise
+        except SearchQuotaError as exc:
+            stop = True
+            _remember_cap(capped, exc.cap)
+            if cap_reasons is not None and str(exc) not in cap_reasons:
+                cap_reasons.append(str(exc))
+            return query, []
         except SearchError:
             if ran is not None:
                 ran.append(query.text)
@@ -1849,6 +2192,42 @@ def _run_queries(
     workers = min(4, len(queries))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(run, queries))
+
+
+def _remember_cap(capped: list | None, kind: str | None) -> None:
+    """Keep one cap label. monthly wins: it stops every later claim too."""
+    if not kind or capped is None:
+        return
+    if kind not in {"per_claim", "monthly"}:
+        return
+    if "monthly" in capped:
+        return
+    if kind == "monthly":
+        capped.clear()
+        capped.append("monthly")
+        return
+    if "per_claim" not in capped:
+        capped.append("per_claim")
+
+
+def _cap_value(capped: list | None) -> str | None:
+    if not capped:
+        return None
+    if "monthly" in capped:
+        return "monthly"
+    if "per_claim" in capped:
+        return "per_claim"
+    return None
+
+
+def _prefer_cap(left, right) -> str | None:
+    """monthly outranks a per-claim stop. Either one outranks a clean round."""
+    found = [item for item in (left, right) if item in {"per_claim", "monthly"}]
+    if "monthly" in found:
+        return "monthly"
+    if "per_claim" in found:
+        return "per_claim"
+    return None
 
 
 def _reserved_keys(found: dict[str, dict]) -> set[str]:
@@ -1940,6 +2319,37 @@ def _same_page(left: str, right: str) -> bool:
 def _is_submitted_page(state: dict, url: str) -> bool:
     submitted = _submitted_page(state)
     return bool(submitted) and _same_page(url, submitted)
+
+
+def _eval_exclude_urls(state: dict) -> list[str]:
+    """Canonical URLs of the source article the eval must not read.
+
+    Empty on a normal check. The allowed eval still reads other
+    fact-checkers; it does not read the article the claim was drawn from.
+    """
+    marks = state.get("run_marks")
+    raw = marks.get("eval_exclude_urls") if isinstance(marks, dict) else None
+    if not isinstance(raw, list):
+        return []
+    found = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        key = canonical_url(item)
+        if key and key not in found:
+            found.append(key)
+    return found
+
+
+def _is_banned_page(url: str, submitted: str, banned: list[str]) -> bool:
+    """True when this URL is the submitted page or the eval's source article.
+
+    Scheme is ignored. A search result that flips http and https, or adds
+    a tracking parameter, is still that article.
+    """
+    if submitted and _same_page(url, submitted):
+        return True
+    return any(_same_page(url, item) for item in banned)
 
 
 def _entities_in_claim(entities, claim: str, *, limit: int) -> dict:
@@ -2151,6 +2561,7 @@ def gather_passages(
     skip_queries: list[str] | None = None,
     extra_queries: list[str] | None = None,
     known_urls: set[str] | None = None,
+    capped: list | None = None,
 ) -> dict:
     """Search, fetch, and pick passages for one claim.
 
@@ -2162,10 +2573,20 @@ def gather_passages(
     started = time.perf_counter()
     deadline = time.monotonic() + config.CLAIM_BUDGET_S
     ran: list[str] = []
+    held = capped if capped is not None else []
+    cap_reasons: list[str] = []
     hits = gather_candidates(
-        state, skip_queries=skip_queries, extra_queries=extra_queries, ran=ran
+        state,
+        skip_queries=skip_queries,
+        extra_queries=extra_queries,
+        ran=ran,
+        capped=held,
+        cap_reasons=cap_reasons,
     )
     pages = fetch_pages(hits)
+    # A second net. gather_candidates already drops the source article.
+    # A page that arrived through a fetch of a redirected URL is not kept.
+    pages = [page for page in pages if not _is_banned_page(page.url, _submitted_page(state), _eval_exclude_urls(state))]
     passages, cosines, dropped_after = select_passages(state, pages)
     finished = finish_passages(state, passages, deadline=deadline)
     kept = finished["passages"]
@@ -2185,6 +2606,8 @@ def gather_passages(
         "passages_if_keep": finished["passages_if_keep"],
         "passages_if_drop": finished["passages_if_drop"],
         "seconds": time.perf_counter() - started,
+        "search_capped": _cap_value(held),
+        "cap_reasons": cap_reasons,
     }
 
 

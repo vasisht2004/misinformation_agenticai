@@ -1,5 +1,9 @@
 """WP:RSP sits behind the curated lists. These check that order.
 
+A missing perennial-source file is a warning, once, and the curated
+lists still decide. The warning names the command that builds the file.
+
+
 hollywoodreporter.com is not on the curated tier-2 list, so a tier of 2
 there is the perennial-source file. thehindu.com and pib.gov.in are
 curated, and a fake RSP row that calls them deprecated must not move them.
@@ -8,6 +12,7 @@ curated, and a fake RSP row that calls them deprecated must not move them.
 from __future__ import annotations
 
 import csv
+import logging
 
 import misinfo_agent.config as config
 from misinfo_agent.investigate import credibility_tier, curated_tier
@@ -63,6 +68,28 @@ def test_past_factcheck_heading():
     })["result"]["seen_before"]
     assert card["match_type"] == "similar"
     assert past_factcheck_heading(card["match_type"]) == "Related past fact-check"
+
+
+def test_missing_rsp_file_warns_once_and_keeps_curated_tiers(monkeypatch, tmp_path, caplog):
+    import misinfo_agent.investigate as investigate
+
+    # The real table may already be cached. This test is about a missing
+    # file, so the loader has to run again, and the warning flag too.
+    monkeypatch.setattr(investigate, "_RSP_TABLE", None)
+    monkeypatch.setattr(investigate, "_RSP_WARNED", False)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    caplog.set_level(logging.WARNING, logger="misinfo_agent.investigate")
+
+    assert credibility_tier("https://www.thehindu.com/news/story") == 2
+    assert credibility_tier("https://pib.gov.in/press") == 1
+    assert credibility_tier("https://some-unknown-health-blog.example/post") == 4
+    # The second lookup must not warn again. The empty table is cached.
+    assert credibility_tier("https://www.thehindu.com/news/another") == 2
+
+    warnings = [record for record in caplog.records if "source_tiers_rsp.csv" in record.message]
+    assert len(warnings) == 1
+    assert "python scripts/build_source_tiers.py" in warnings[0].message
+    assert "curated lists" in warnings[0].message
 
 
 def _uncurated_deprecated() -> str:

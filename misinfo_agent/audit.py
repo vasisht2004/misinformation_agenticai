@@ -49,6 +49,7 @@ _COLUMNS = (
     "models",
     "prompt_versions",
     "errors",
+    "search_capped",
 )
 
 
@@ -115,6 +116,10 @@ def _record(state: dict) -> dict:
         "models": models,
         "prompt_versions": versions,
         "errors": list(state.get("errors") or []),
+        # per_claim, monthly, or empty when the search budget was not hit.
+        # Read from the state key the investigate node writes. The stats
+        # copy is the fallback for a row recorded before that key existed.
+        "search_capped": _search_capped(state),
     }
 
 
@@ -154,6 +159,16 @@ def _append_addition(path: Path, state: dict) -> None:
     row.to_parquet(path, index=False)
 
 
+def _search_capped(state: dict) -> str:
+    value = state.get("search_capped")
+    if value in {"per_claim", "monthly"}:
+        return value
+    stats = state.get("investigate_stats")
+    if isinstance(stats, dict) and stats.get("search_capped") in {"per_claim", "monthly"}:
+        return stats["search_capped"]
+    return ""
+
+
 def _insert(path: Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
@@ -180,6 +195,11 @@ def _insert(path: Path, record: dict) -> None:
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+        # Runs written before this column existed still open. Adding the
+        # column keeps INSERT OR REPLACE from failing on the old file.
+        if "search_capped" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN search_capped TEXT")
         payload = dict(record)
         for key in ("evidence_ids", "models", "prompt_versions", "errors"):
             payload[key] = json.dumps(payload.get(key) or [], ensure_ascii=False)

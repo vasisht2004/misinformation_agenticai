@@ -597,8 +597,8 @@ def _page_check() -> None:
     exclude = st.toggle(
         "Exclude fact-check websites",
         key="exclude_factcheck",
-        value=True,
-        help="The system has to find the evidence itself instead of copying a fact-checker.",
+        value=False,
+        help="Off for a real check: fact-checkers are part of the evidence. Turn this on for a demonstration that has to find the evidence without them.",
     )
     if st.button("Check", type="primary", width="stretch"):
         image = None
@@ -854,9 +854,9 @@ def _apply_run_flags(job: dict) -> None:
         config.BLOCK_FACTCHECK_SITES = bool(job.get("exclude"))
         return
     # More evidence searches again. It has to keep the block the first
-    # search used. A restarted process loses the map; excluding is the
-    # check page's default, and the honest number.
-    remembered = st.session_state.exclude_by_thread.get(job.get("thread_id"), True)
+    # search used. A restarted process loses the map; including
+    # fact-checkers is the check page's default.
+    remembered = st.session_state.exclude_by_thread.get(job.get("thread_id"), False)
     config.BLOCK_FACTCHECK_SITES = bool(remembered)
 
 

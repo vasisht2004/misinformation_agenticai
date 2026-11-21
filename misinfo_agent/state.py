@@ -184,6 +184,10 @@ class ClaimState(TypedDict, total=False):
     # passages split, independent groups on each side, circulation
     # sightings, seconds, and a note when a cap stopped the round short.
     investigate_stats: dict
+    # Box 7. "per_claim", "monthly", or absent. Set when a search cap
+    # stopped a later query. Pages from the queries that finished stay.
+    # None is not stored: a clean run leaves the key missing.
+    search_capped: str | None
     # Box 9. How many investigate rounds have already finished. The gate
     # and box 12 stop at config.MAX_SEARCH_ROUNDS. A search_more return
     # is the only write that advances this.

@@ -68,7 +68,20 @@ class SearchQuotaError(SearchError):
 
     Raised for the local monthly cap, the per-claim cap, and a quota error
     from Tavily. None of those is a blip, so none of them is retried.
+    cap is "per_claim" or "monthly" when this process enforced the limit,
+    and None when the provider reported the quota itself.
     """
+
+    def __init__(self, purpose: str, reason: str, cap: str | None = None):
+        super().__init__(purpose, reason)
+        if cap in {"per_claim", "monthly"}:
+            self.cap = cap
+        elif "monthly" in (reason or ""):
+            self.cap = "monthly"
+        elif "per-claim" in (reason or "") or "per_claim" in (reason or ""):
+            self.cap = "per_claim"
+        else:
+            self.cap = None
 
 
 class Hit(BaseModel):
@@ -145,7 +158,7 @@ def search(
     started = time.perf_counter()
     include, exclude = _effective_domains(include_domains, exclude_domains)
     try:
-        hits, from_cache = _run(
+        hits, from_cache, cache_miss = _run(
             query, purpose, max_results, include, exclude, search_depth, end_date
         )
     except SearchError:
@@ -156,6 +169,13 @@ def search(
         # can quote the key. Wrap it before it reaches the audit.
         _record(purpose, query, 0, started, cached=False, success=False)
         raise SearchError(purpose, _safe(exc, None, query)) from None
+    if cache_miss:
+        # An empty list, not a cached empty search. Writing it would make
+        # the next run think Tavily returned nothing.
+        _record(
+            purpose, query, 0, started, cached=False, success=True, cache_miss=True
+        )
+        return []
     # Belt and braces. The exclude list is already on the request; a hit
     # that ignores it must still not reach the evidence table. Done before
     # the cache write so a replay cannot bring the page back.
@@ -260,7 +280,11 @@ def _run(query, purpose, max_results, include, exclude, search_depth, end_date):
     if cached is not None:
         # A hit is still a search, from the audit's point of view.
         # cached=True tells box 16 it did not spend a credit again.
-        return cached, True
+        return cached, True, False
+    # Cache-only is a miss with no provider call. Checked before the fake
+    # and before _real so a test can prove Tavily was not asked.
+    if cache_only_enabled():
+        return [], False, True
     # A fake never reaches the cap or the client. Tests stay offline, and
     # a fake answer must not burn a slot of the monthly quota.
     if _FAKE is not None:
@@ -272,10 +296,10 @@ def _run(query, purpose, max_results, include, exclude, search_depth, end_date):
             search_depth=search_depth,
             end_date=end_date,
         )
-        return _coerce_hits(raw, purpose), False
+        return _coerce_hits(raw, purpose), False, False
     return _real(
         query, purpose, max_results, include, exclude, search_depth, end_date
-    ), False
+    ), False, False
 
 
 def _real(query, purpose, max_results, include, exclude, search_depth, end_date):
@@ -492,18 +516,17 @@ def _registrable(host: str) -> str:
     return (found or cleaned).lower()
 
 
-def factcheck_blocked(url: str, title: str = "") -> bool:
-    """True when a blocked-mode search must not keep this hit.
+def looks_like_factcheck(url: str, title: str = "") -> bool:
+    """True when this page is a fact-check, whether or not the block is on.
 
     Five independent reasons, any one is enough: the host is a fact-check
     publication or its subdomain, the registrable name itself says
     fact-check, the path is a fact-check section, the title says it is a
     fact check, or the page is PIB Fact Check on any host. A normal
-    pib.gov.in press release matches none of these.
-    When the block is off this is always false.
+    pib.gov.in press release matches none of these. The eval uses this
+    while fact-check sites are allowed, to count those pages without
+    dropping them.
     """
-    if not config.BLOCK_FACTCHECK_SITES:
-        return False
     host = site_host(url)
     if _host_is_suffix(host, block_suffixes()):
         return True
@@ -521,6 +544,18 @@ def factcheck_blocked(url: str, title: str = "") -> bool:
     if "fact check" in folded or "fact-check" in folded:
         return True
     return _is_pib_factcheck(host, path, folded)
+
+
+def factcheck_blocked(url: str, title: str = "") -> bool:
+    """True when a blocked-mode search must not keep this hit.
+
+    When the block is off this is always false: a demo, and the allowed
+    eval, may read a fact-check on purpose. The page test itself is
+    looks_like_factcheck, so the two cannot drift.
+    """
+    if not config.BLOCK_FACTCHECK_SITES:
+        return False
+    return looks_like_factcheck(url, title)
 
 
 def _host_is_suffix(host: str, suffixes) -> bool:
@@ -583,12 +618,25 @@ def _raise_if_capped(purpose: str, count: int, claim_n: int) -> None:
         raise SearchQuotaError(
             purpose,
             f"monthly search cap reached ({count} calls)",
+            cap="monthly",
         )
     if claim_n >= config.MAX_SEARCHES_PER_CLAIM:
         raise SearchQuotaError(
             purpose,
             f"per-claim search cap reached ({claim_n} calls)",
+            cap="per_claim",
         )
+
+
+def cache_only_enabled() -> bool:
+    """True when SEARCH_CACHE_ONLY says a miss must not call Tavily.
+
+    The eval sets this so a re-run can replay cached searches. A miss is
+    an empty result, not a billed call. Page fetches are a different
+    budget and are not gated here.
+    """
+    raw = os.environ.get("SEARCH_CACHE_ONLY", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _month_key() -> str:
@@ -776,7 +824,7 @@ def _write_cache(query, max_results, include, exclude, search_depth, end_date, h
     temporary.replace(path)
 
 
-def _record(purpose, query, n_results, started, *, cached, success) -> None:
+def _record(purpose, query, n_results, started, *, cached, success, cache_miss=False) -> None:
     row = {
         "purpose": purpose,
         "query": query,
@@ -784,6 +832,8 @@ def _record(purpose, query, n_results, started, *, cached, success) -> None:
         "latency_s": round(time.perf_counter() - started, 6),
         "cached": cached,
         "success": success,
+        # A cache-only miss. cached stays false: nothing was stored.
+        "cache_miss": bool(cache_miss),
     }
     with _USAGE_LOCK:
         _USAGE.append(row)

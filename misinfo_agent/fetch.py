@@ -19,6 +19,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import logging
 import re
 import socket
 import time
@@ -31,6 +32,26 @@ from pydantic import BaseModel, Field
 
 import misinfo_agent.config as config
 from misinfo_agent.search import Hit, registrable_domain, site_host
+
+_log = logging.getLogger(__name__)
+# URLs opened over HTTP in this process, not served from the page cache
+# and not taken from Tavily's raw text. The eval prints the list so a
+# cache-only run can see which pages were new. Tavily is not involved.
+_FRESH_FETCHES: list[str] = []
+
+
+def fresh_page_fetches() -> list[str]:
+    """Pages downloaded since the last reset. A copy, not the live list."""
+    return list(_FRESH_FETCHES)
+
+
+def reset_fresh_page_fetches() -> None:
+    _FRESH_FETCHES.clear()
+
+
+def _note_fresh_fetch(url: str) -> None:
+    _FRESH_FETCHES.append(url)
+    _log.info("fresh page fetch %s", url)
 
 # HTML bodies. A circular over this is not an article we can hold in memory
 # for one claim. PDFs are larger because a gazette is a scan of many pages;
@@ -193,6 +214,7 @@ def fetch_page(hit: Hit) -> Page:
         # Abandoned at eight seconds even if the socket is still open.
         # requests will try every address getaddrinfo returned, and one
         # dead address used to hold the whole claim.
+        _note_fresh_fetch(hit.url)
         final_url, body, content_type = _bounded(_download, hit.url)
     except FetchError as exc:
         return _snippet(hit, "failed", exc.reason)
