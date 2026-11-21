@@ -111,12 +111,24 @@ def run_pipeline(
     checkpoint_path: Path | str | None = None,
     audit_path: Path | str | None = None,
     additions_path: Path | str | None = None,
+    eval_claim_date: str | None = None,
+    eval_exclude_ids: list[str] | None = None,
+    eval_exclude_urls: list[str] | None = None,
+    eval_sites: str | None = None,
 ) -> dict:
     """Run one claim, or resume a paused review on the same thread_id.
 
     A quota error propagates. An interrupt returns status "interrupt"
     and the review summary. A finished run returns status "done" and
     the result card. The raw submission is not in that return value.
+
+    eval_claim_date, eval_exclude_ids and eval_exclude_urls are for the
+    evaluation harness. A normal check leaves them empty. The date
+    replaces the submission day after ingest. The ids are left out of
+    the memory search. The urls are the source article: search results,
+    fetched pages and evidence all drop that one page. They ride on
+    run_marks, which is already part of the state, so the state
+    contract does not grow a field for one script.
     """
     thread = thread_id or uuid.uuid4().hex
     graph = build_graph(checkpoint_path, audit_path, additions_path)
@@ -126,16 +138,28 @@ def run_pipeline(
             # The checkpointer would store the pixels on every step.
             # Ingest reads a path. A bytes submission is not a path.
             raise TypeError("image input must be a file path, not raw bytes")
+        marks = {
+            "run_id": thread,
+            "llm_calls": len(get_usage()),
+            "searches": len(get_search_usage()),
+            "started": time.perf_counter(),
+        }
+        # Absent on a normal check. Present only when the eval asked.
+        if eval_claim_date:
+            marks["eval_claim_date"] = eval_claim_date
+        if eval_exclude_ids:
+            marks["eval_exclude_ids"] = [str(item) for item in eval_exclude_ids]
+        if eval_exclude_urls:
+            marks["eval_exclude_urls"] = [str(item) for item in eval_exclude_urls if str(item).strip()]
+        if eval_sites:
+            # Which eval file this thread belongs to. A later read of the
+            # checkpoint has to tell a blocked run from an allowed one.
+            marks["eval_sites"] = str(eval_sites)
         initial = {
             "raw_input": raw or "",
             "input_type": input_type,
             "caption": caption or "",
-            "run_marks": {
-                "run_id": thread,
-                "llm_calls": len(get_usage()),
-                "searches": len(get_search_usage()),
-                "started": time.perf_counter(),
-            },
+            "run_marks": marks,
         }
         out = graph.invoke(initial, cfg)
     else:
@@ -227,11 +251,26 @@ def _failed(state: dict, name: str) -> bool:
 
 def _ingest(state: dict) -> dict:
     from misinfo_agent.ingest import ingest
-    return ingest(
+    update = ingest(
         state.get("raw_input") or "",
         input_type=state.get("input_type") or "text",
         caption=state.get("caption") or None,
     )
+    override = _mark(state, "eval_claim_date")
+    if isinstance(override, str) and override.strip():
+        # Ingest dates the message as today. An eval claim was circulating
+        # on the fact-check's date, and the memory filter and the page-date
+        # guard both read claim_date. The first ten characters are the day.
+        update["claim_date"] = override.strip()[:10]
+    return update
+
+
+def _mark(state: dict, key: str):
+    """One value off run_marks, or None when this run did not set it."""
+    marks = state.get("run_marks")
+    if isinstance(marks, dict):
+        return marks.get(key)
+    return None
 
 
 def _extract(state: dict) -> dict:
@@ -243,10 +282,17 @@ def _memory(state: dict) -> dict:
     from misinfo_agent.memory import get_memory
     claim = state.get("claim") or state.get("match_text") or ""
     domain = state.get("domain") or None
+    exclude = _mark(state, "eval_exclude_ids")
+    # date_before is strict, so the source article's own day is already
+    # out. The harness decides which ids to add. The blocked eval passes
+    # the article plus its near-duplicate copies. The allowed eval passes
+    # only the article, so an earlier fact-check of the same rumour can
+    # still be retrieved. A normal check leaves the list unset.
     hits = get_memory().search(
         claim,
         date_before=state.get("claim_date") or None,
         domains=[domain] if domain else None,
+        exclude_ids=list(exclude) if exclude else None,
     )
     return {"matches": hits}
 
@@ -287,6 +333,11 @@ def _investigate(state: dict) -> dict:
         "passages": passages,
         "investigate_stats": stats,
     }
+    # The cap is a property of the claim, not of the last round. A later
+    # round that searched cleanly must not wipe a cap the first round hit.
+    cap = _prefer_search_cap(state.get("search_capped"), stats.get("search_capped"))
+    if cap:
+        out["search_capped"] = cap
     if int(state.get("rounds") or 0) < 1:
         out["rounds"] = 1
     return out
@@ -306,7 +357,22 @@ def _merge_stats(old, new: dict) -> dict:
     merged["topup_used"] = bool(old.get("topup_used")) or bool(new.get("topup_used"))
     merged["stance_failed"] = bool(old.get("stance_failed")) or bool(new.get("stance_failed"))
     merged["repaired"] = int(old.get("repaired") or 0) + int(new.get("repaired") or 0)
+    # The new round's dict would otherwise replace the first round's
+    # mismatches, and the eval would under-count a claim that searched twice.
+    merged["reason_label_mismatch"] = (
+        int(old.get("reason_label_mismatch") or 0) + int(new.get("reason_label_mismatch") or 0)
+    )
+    merged["search_capped"] = _prefer_search_cap(old.get("search_capped"), new.get("search_capped"))
     return merged
+
+
+def _prefer_search_cap(left, right) -> str | None:
+    found = [item for item in (left, right) if item in {"per_claim", "monthly"}]
+    if "monthly" in found:
+        return "monthly"
+    if "per_claim" in found:
+        return "per_claim"
+    return None
 
 
 def _gate(state: dict) -> dict:

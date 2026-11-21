@@ -18,6 +18,7 @@ from misinfo_agent.investigate import (
     canonical_url,
     finish_passages,
     gather_candidates,
+    gather_factcheck_hits,
     investigate,
     passage_windows,
     select_passages,
@@ -440,6 +441,180 @@ def test_factcheck_hits_dropped_and_excluded_when_blocking(monkeypatch):
     assert searches_this_month() == 0
 
 
+def test_factcheck_phrase_window_stays_when_blocking_is_off(monkeypatch):
+    # The phrase rule is the blocked-mode answer key. A news page that
+    # quotes a fact-check is dropped only while that block is on. With
+    # the block off the same window is a passage.
+    import misinfo_agent.investigate as investigate_module
+
+    monkeypatch.setattr(investigate_module, "get_encoder", lambda: _FakeEncoder())
+    monkeypatch.setattr(config, "EVAL_DROP_AFTER_CLAIM", False)
+    page = _page(
+        "https://www.thehindu.com/story",
+        [
+            _sentence("0.90"),
+            "This fact check says the notice was never issued by the ministry yesterday.",
+            _sentence("0.20"),
+        ],
+    )
+    state = _state("Health", claim="CLAIM the ministry banned the medicine outright")
+    monkeypatch.setattr(config, "BLOCK_FACTCHECK_SITES", False)
+    assert investigate_module._quotes_factcheck("This fact check says the notice was never issued.") is False
+    kept, _cosines, _dropped = select_passages(state, [page])
+    assert kept
+    assert any("fact check" in passage.text.casefold() for passage in kept)
+    monkeypatch.setattr(config, "BLOCK_FACTCHECK_SITES", True)
+    assert investigate_module._quotes_factcheck("This fact check says the notice was never issued.") is True
+    dropped, _cosines, _dropped = select_passages(state, [page])
+    assert dropped == []
+
+
+def test_factcheck_budget_excludes_the_exact_url_and_caps_fetches(monkeypatch):
+    # The source article is one URL. Another story on that host is still
+    # a fact-check the allowed run may read. News hits are not part of
+    # this budget, and the eighth fetch is the last one opened.
+    monkeypatch.setattr(config, "BLOCK_FACTCHECK_SITES", False)
+    monkeypatch.setattr(config, "EVAL_DROP_AFTER_CLAIM", False)
+    rows = [
+        _hit("https://www.boomlive.in/own?utm_source=a", "own", 0.99),
+        _hit("https://www.boomlive.in/other-story", "other", 0.98),
+        _hit("https://www.thehindu.com/news/story", "news", 0.97),
+    ]
+    rows.extend(
+        _hit(f"https://altnews.in/story-{index}", f"desk {index}", 0.50 - index * 0.01)
+        for index in range(9)
+    )
+    set_fake_search(lambda query, **kwargs: rows)
+    state = _state("Health")
+    state["run_marks"] = {
+        "eval_sites": "allowed",
+        "eval_exclude_urls": ["http://boomlive.in/own"],
+    }
+    found = gather_factcheck_hits(state)
+    urls = [hit.url for hit in found]
+    assert len(urls) == 8
+    assert "https://boomlive.in/own" not in urls
+    assert "https://boomlive.in/other-story" in urls
+    assert "https://altnews.in/story-0" in urls
+    assert "https://altnews.in/story-8" not in urls
+    assert all("thehindu.com" not in url for url in urls)
+
+
+def test_allowed_evidence_keeps_every_blocked_row(monkeypatch):
+    # Allowed evidence is the blocked rows plus a fact-check row. The
+    # open-web response does not include the news URLs, so they survive
+    # only because the news search still runs with the block on.
+    import re
+
+    import misinfo_agent.investigate as investigate_module
+    from misinfo_agent.llm import set_fake
+
+    monkeypatch.setattr(investigate_module, "get_encoder", lambda: _FakeEncoder())
+    monkeypatch.setattr(config, "BLOCK_FACTCHECK_SITES", False)
+    monkeypatch.setattr(config, "EVAL_DROP_AFTER_CLAIM", True)
+    # One sentence, so the fake encoder sees 0.90 as the first token of
+    # the only window. A period would start a second window on "The".
+    filler = (
+        "and the branches were told to keep paying the same notes to customers "
+        "who needed cash for the market the school fee and the train home while "
+        "the clerk repeated that no order had arrived by post or by email"
+    )
+
+    def article(lead):
+        return {
+            "content": "snippet",
+            "raw_content": f"0.90 {lead} {filler} {filler}",
+        }
+
+    rbi = {
+        "url": "https://www.rbi.org.in/notice",
+        "title": "RBI",
+        "score": 0.9,
+        "published_date": "2024-11-01",
+        **article("The Reserve Bank said no circular has been issued declaring the old notes invalid"),
+    }
+    hindu = {
+        "url": "https://www.thehindu.com/news/story",
+        "title": "The Hindu",
+        "score": 0.8,
+        "published_date": "2024-11-02",
+        **article("The ministry confirmed that no such order was sent to the banks or the branches"),
+    }
+    own = {
+        "url": "https://www.boomlive.in/own?utm_source=a",
+        "title": "own fact check",
+        "score": 0.99,
+        "published_date": "2024-11-03",
+        **article("This fact check found that the notice was never issued by the ministry at all"),
+    }
+    other = {
+        "url": "https://www.boomlive.in/other-story",
+        "title": "other fact check",
+        "score": 0.7,
+        "published_date": "2024-11-04",
+        **article("This fact check found that the notice was never issued by the ministry at all"),
+    }
+    later = {
+        "url": "https://www.altnews.in/later",
+        "title": "later fact check",
+        "score": 0.6,
+        "published_date": "2025-02-01",
+        **article("A later fact check found that the notice was never issued by the ministry afterwards"),
+    }
+
+    def fake_search(query, **kwargs):
+        exclude = kwargs.get("exclude_domains") or []
+        if "boomlive.in" in exclude:
+            return [rbi, hindu]
+        return [own, other, later]
+
+    def fake_llm(prompt, schema, images):
+        if schema.__name__ == "TopupBatch":
+            return {"queries": []}
+        if schema.__name__ == "RepairBatch":
+            return {"judgements": []}
+        judgements = []
+        for block in re.split(r"(?m)(?=^P\d+\b)", prompt):
+            match = re.match(r"P\d+", block)
+            if match is None:
+                continue
+            if "fact check found" in block.casefold():
+                quote = "This fact check found that the notice was never issued"
+            elif "ministry confirmed" in block.casefold():
+                quote = "The ministry confirmed that no such order was sent"
+            else:
+                quote = "The Reserve Bank said no circular has been issued"
+            judgements.append({
+                "passage_id": match.group(0),
+                "stance": "supports",
+                "quote": quote,
+                "reason": "The page states it.",
+            })
+        return {"judgements": judgements}
+
+    set_fake_search(fake_search)
+    set_fake(fake_llm)
+    state = _state("Health", claim="CLAIM the ministry banned the medicine outright")
+    state["claim_date"] = "2024-12-15"
+    state["run_marks"] = {
+        "eval_sites": "allowed",
+        "eval_exclude_urls": ["http://boomlive.in/own"],
+    }
+    try:
+        result = investigate(state)
+    finally:
+        set_fake(None)
+    urls = {row["url"] for row in result["evidence"]}
+    assert "https://rbi.org.in/notice" in urls
+    assert "https://thehindu.com/news/story" in urls
+    assert "https://boomlive.in/other-story" in urls
+    assert "https://boomlive.in/own" not in urls
+    assert "https://altnews.in/later" not in urls
+    assert any("fact check" in passage["text"].casefold() for passage in result["passages"])
+    assert result["investigate_stats"]["factcheck_after_claim"] >= 1
+    assert config.BLOCK_FACTCHECK_SITES is False
+
+
 def test_factcheck_hits_kept_when_blocking_is_off():
     set_fake_search(
         lambda query, **kwargs: [
@@ -549,6 +724,7 @@ def test_cached_and_fake_calls_do_not_count(monkeypatch, tmp_path):
         "latency_s",
         "cached",
         "success",
+        "cache_miss",
     }
     reset_search_usage()
     assert get_search_usage() == []
@@ -1615,6 +1791,116 @@ def test_search_quota_returns_a_partial_result():
     assert result["evidence"] == []
     assert result["investigate_stats"]["notes"]
     assert "monthly cap" in result["investigate_stats"]["notes"][0]
+    assert result["investigate_stats"]["search_capped"] == "monthly"
+
+
+def test_cap_on_query_three_keeps_the_pages_already_found(monkeypatch, tmp_path):
+    """A cap on a later query must not throw away the pages already in hand.
+
+    Stance still reads those pages. The audit row records which cap fired.
+    """
+    import misinfo_agent.investigate as investigate_module
+    from misinfo_agent.audit import audit
+    from misinfo_agent.llm import set_fake
+
+    monkeypatch.setattr(investigate_module, "get_encoder", lambda: _FakeEncoder())
+    state = _state("Health", claim="CLAIM the ministry banned the medicine")
+    planned = build_queries(state)
+    assert len(planned) >= 3
+    first, second, third = planned[0].text, planned[1].text, planned[2].text
+    shared = "The Reserve Bank said no circular has been issued declaring the old notes invalid"
+    filler = (
+        "from December and holders can keep using them every day at shops and banks across India "
+        "without exchanging them for a new series or meeting any deadline the forwarded message "
+        "invented for the public and branches have been told to treat that message as a rumour "
+        "rather than a circular while cash machines continue to dispense the same notes to customers "
+        "who need cash for the market the school fee the rent and the train ticket home tonight"
+    )
+
+    def page(url, tail):
+        return {
+            "url": url,
+            "title": "Notice",
+            "content": "snippet",
+            "score": 0.9,
+            "published_date": "2020-01-02",
+            "raw_content": f"0.90 {shared} {filler} {tail}",
+        }
+
+    def fake_search(query, **kwargs):
+        if query == third:
+            raise SearchQuotaError(
+                "investigate_neutral",
+                "per-claim search cap reached (8 calls)",
+                cap="per_claim",
+            )
+        if query == first:
+            return [page("https://www.rbi.org.in/notice", "at the reserve bank counter today")]
+        if query == second:
+            return [page("https://www.thehindu.com/story", "at the hindu newsroom desk today")]
+        return []
+
+    seen_prompts = []
+
+    def fake_llm(prompt, schema, images):
+        seen_prompts.append(prompt)
+        return {
+            "judgements": [
+                {"passage_id": f"P{n}", "stance": "supports", "quote": shared, "reason": "The bank denies it."}
+                for n in range(1, 8)
+            ]
+        }
+
+    set_fake_search(fake_search)
+    set_fake(fake_llm)
+    try:
+        result = investigate(state)
+    finally:
+        set_fake(None)
+        set_fake_search(None)
+    urls = {canonical_url(passage["url"]) for passage in result["passages"]}
+    assert "https://rbi.org.in/notice" in urls
+    assert "https://thehindu.com/story" in urls
+    evidence_urls = {canonical_url(row["url"]) for row in result["evidence"]}
+    assert "https://rbi.org.in/notice" in evidence_urls
+    # Both pages were in the stance prompt. A repeated quote can leave only
+    # one evidence row; that filter is not the cap throwing a page away.
+    assert seen_prompts
+    assert "reserve bank counter" in seen_prompts[0]
+    assert "hindu newsroom" in seen_prompts[0]
+    assert result["investigate_stats"]["search_capped"] == "per_claim"
+    assert result["investigate_stats"]["llm_calls"] >= 1
+    notes = " ".join(result["investigate_stats"]["notes"])
+    assert "search_capped=per_claim" in notes
+    assert "per-claim search cap" in notes
+    stored = dict(state)
+    stored["search_capped"] = result["investigate_stats"]["search_capped"]
+    stored["investigate_stats"] = result["investigate_stats"]
+    stored["verdict"] = "Unverifiable"
+    stored["run_marks"] = {"run_id": "cap-test"}
+    row = audit(stored, db_path=tmp_path / "audit.db", additions_path=tmp_path / "additions.parquet")
+    assert row["audit"]["search_capped"] == "per_claim"
+
+
+def test_cache_only_miss_never_calls_tavily(monkeypatch):
+    """A cache miss in cache-only mode is an empty result, not a Tavily call."""
+    monkeypatch.setenv("SEARCH_CACHE_ONLY", "1")
+    called = []
+
+    def boom(*args, **kwargs):
+        called.append(1)
+        raise AssertionError("Tavily was called")
+
+    monkeypatch.setattr(search, "_real", boom)
+    set_fake_search(None)
+    reset_search_usage()
+    hits = run_search("a query that is not in the cache", purpose="cache_only_test")
+    assert hits == []
+    assert called == []
+    usage = get_search_usage()
+    assert usage
+    assert usage[-1]["cache_miss"] is True
+    assert usage[-1]["cached"] is False
 
 
 def test_llm_error_keeps_the_passages(monkeypatch):

@@ -24,6 +24,12 @@ Build the memory (this writes `data/memory/` and skips the work when the manifes
 python -c "from misinfo_agent.memory import build_memory; build_memory()"
 ```
 
+Wikipedia's perennial sources list adds credibility tiers the curated lists do not name. The checker still runs without the file and logs a warning once. Build it with:
+
+```bash
+python scripts/build_source_tiers.py
+```
+
 ```bash
 cp .env.example .env
 pytest
