@@ -10,8 +10,8 @@ memory index load once per process, and only when a real check starts:
 a fixture URL must not pay for the encoder or touch the shared index.
 
 `?fixture=` draws a recorded card and does not call the pipeline.
-SEARCH_CACHE_ONLY defaults on because the monthly search cap is spent;
-a demo that misses the cache must not open a new search.
+SEARCH_CACHE_ONLY defaults on so a demo does not spend the remaining
+November credits. The counter over-counts; the cap is 1000 until 1 Dec.
 """
 
 from __future__ import annotations
@@ -738,7 +738,7 @@ def _page_check(fixture: str) -> None:
                 key="demo_cache_only",
                 help=(
                     "On by default. A search that is not already cached returns nothing "
-                    "instead of calling Tavily. The monthly search cap is spent."
+                    "instead of calling Tavily. The counter is ahead of the real balance; the cap is 1000 until 1 Dec."
                 ),
             )
             st.toggle(
