@@ -270,6 +270,16 @@ _HINGLISH_WORDS = frozenset(
     }
 )
 _LATIN_WORD = re.compile(r"[A-Za-z]+")
+# Function words a short English sentence almost always has. The detector
+# labels "An Aadhaar number has 12 digits." as Afrikaans with probability
+# 1. Two of these words, in a sentence whose letters are Latin, is English
+# even when that probability is certain. The list is closed on purpose:
+# a content word such as "note" must not be enough by itself.
+_ENGLISH_FUNCTION = frozenset({"a", "an", "the", "is", "has", "of", "in"})
+# Below this, langdetect is unsure. A unsure label is not a language we
+# can reject on. 0.90 is the bar: the Aadhaar miss is certain and wrong,
+# so it is caught by the function-word rule, not by this one.
+_LANG_SURE = 0.90
 # A "content word" is a run of letters. Digits stay in the text (amounts
 # and dates are the claim) but they are not words, and a 2-digit token
 # must not push a greeting over the length bar. Two letters so "OK" counts
@@ -657,9 +667,19 @@ def _language(cleaned: str) -> tuple[str, bool, str | None]:
         # Still checked. language stays "en" so a downstream "not English"
         # branch does not drop a Hinglish forward the heuristic accepted.
         return "en", True, None
-    code = _detect_lang(cleaned)
+    code, top = _detect_lang_prob(cleaned)
     if code is None or code == "en":
         # A detector failure is not evidence of another language.
+        return "en", False, None
+    # Never reject a short English sentence. langdetect is sure and wrong
+    # on "An Aadhaar number has 12 digits." (Afrikaans, probability 1).
+    # An unsure top label is not a language either. A Latin sentence that
+    # uses ordinary English function words is English even when the
+    # detector is certain. Devanagari already returned above, so this
+    # does not pull Hindi back into scope.
+    if top is not None and top < _LANG_SURE:
+        return "en", False, None
+    if _mostly_ascii_english(cleaned):
         return "en", False, None
     return code, False, _OUT_OF_SCOPE
 
@@ -688,21 +708,51 @@ def _is_hinglish(text: str) -> bool:
     return False
 
 
+def _mostly_ascii_english(text: str) -> bool:
+    """Latin letters plus at least two English function words.
+
+    85% of the letters must be ASCII. A Devanagari sentence never reaches
+    this function: the script check returns first. The function-word count
+    is what stops a Latin sentence in another language from passing just
+    because its letters are ASCII.
+    """
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return False
+    ascii_letters = sum(1 for ch in letters if ord(ch) < 128)
+    if ascii_letters / len(letters) < 0.85:
+        return False
+    words = {word.casefold() for word in _LATIN_WORD.findall(text)}
+    return len(words & _ENGLISH_FUNCTION) >= 2
+
+
 def _detect_lang(text: str) -> str | None:
-    """langdetect, seeded.
+    """langdetect, seeded. The code only. See _detect_lang_prob."""
+    code, _prob = _detect_lang_prob(text)
+    return code
+
+
+def _detect_lang_prob(text: str) -> tuple[str | None, float | None]:
+    """langdetect's top language and its probability, seeded.
 
     The library draws a random sample unless the seed is set, so the
     same English paragraph can come back as another language on the
     next call. Seed 0 makes a rerun of this box return the same code.
+    The probability is how the short-English rule tells a sure label
+    from a shrug. detect() does not return it.
     """
     try:
-        from langdetect import DetectorFactory, detect
+        from langdetect import DetectorFactory, detect_langs
 
         # Again, in case another import reset the factory after ours.
         DetectorFactory.seed = 0
-        return detect(text)
+        ranked = detect_langs(text)
+        if not ranked:
+            return None, None
+        top = ranked[0]
+        return top.lang, float(top.prob)
     except Exception:
-        return None
+        return None, None
 
 
 def _flags(signals: dict, *, hinglish: bool, checkable: bool) -> list[str]:

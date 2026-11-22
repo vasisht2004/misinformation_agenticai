@@ -116,6 +116,10 @@ _MONTH_DAY = re.compile(
 # Indian fact-checks write the day first. 01/12/2025 is 1 December, not
 # 12 January. A month above 12 is rejected rather than swapped.
 _NUMERIC_DATE = re.compile(r"\b(\d{1,2})[/\-](\d{1,2})[/\-]((?:19|20)\d{2})\b")
+# ISO writes the year first. 1950-01-26 is 26 January 1950. The day-first
+# pattern does not match a four-digit year in the first place, so this
+# form was left as a bare year plus the numbers 1 and 26.
+_ISO_DATE = re.compile(r"\b((?:19|20)\d{2})-(\d{1,2})-(\d{1,2})\b")
 
 _IDF: dict[str, float] | None = None
 
@@ -460,7 +464,12 @@ def _extract_dates(text: str) -> tuple[list[dict], str]:
     if not text:
         return [], ""
     found = []
-    for pattern, kind in ((_NUMERIC_DATE, "numeric"), (_DAY_MONTH, "day_month"), (_MONTH_DAY, "month_day")):
+    for pattern, kind in (
+        (_ISO_DATE, "iso"),
+        (_NUMERIC_DATE, "numeric"),
+        (_DAY_MONTH, "day_month"),
+        (_MONTH_DAY, "month_day"),
+    ):
         for match in pattern.finditer(text):
             parsed = _interpret_date(kind, match)
             if parsed is not None:
@@ -484,7 +493,9 @@ def _extract_dates(text: str) -> tuple[list[dict], str]:
 
 
 def _interpret_date(kind: str, match: re.Match) -> dict | None:
-    if kind == "numeric":
+    if kind == "iso":
+        year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    elif kind == "numeric":
         day, month, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
     elif kind == "day_month":
         day = int(match.group(1))
@@ -584,8 +595,10 @@ _RS_PREFIX = re.compile(
     r"(?<![A-Za-z])(?:₹|rs\.?|inr)\s*(\d[\d,]*)(?:\.\d+)?",
     re.IGNORECASE,
 )
+# A hyphen is how "2000-rupee" is written. Without it the 2000 is read as
+# a year, and the amount the claim named never matches.
 _RS_WORD = re.compile(
-    r"(?<![A-Za-z\d])(\d[\d,]*)(?:\.\d+)?\s*rupees?\b",
+    r"(?<![A-Za-z\d])(\d[\d,]*)(?:\.\d+)?(?:\s*-?\s*)rupees?\b",
     re.IGNORECASE,
 )
 
@@ -1273,7 +1286,12 @@ def _core_support_relaxed(quote: str, core: str, passage: str) -> bool:
     haystack = _quote_and_sentence(quote, passage)
     core_bits = _parse_details(core_text)
     hay_bits = _parse_details(haystack)
-    if not _quantities_covered(core_bits, hay_bits):
+    # Relaxed only. A year-only claim ("in 1950", "in May 2023") is covered
+    # by a full date in that year. The year inside "19 May 2023" is blanked
+    # so it is not also a bare year, and the strict subset check then
+    # misses it. A full date in the claim still has to match day, month,
+    # and year. 1950 does not match 1947. 12 does not match 16.
+    if not _quantities_covered_relaxed(core_bits, hay_bits):
         return False
     named = _strip_possessives(haystack)
     # The longest capital token is often an adjective ("Democratic").
@@ -1288,6 +1306,23 @@ def _core_support_relaxed(quote: str, core: str, passage: str) -> bool:
     if not str(quote or "").strip() and (entity or actions or _has_quantity(core_bits)):
         return False
     return True
+
+
+def _quantities_covered_relaxed(core_bits: dict, other_bits: dict) -> bool:
+    """Strict figures, plus a bare year covered by a date in that year.
+
+    The date check is unchanged: a claim that names 26 January 1950 still
+    needs that day. Only a year that is not already inside a claim date
+    may be satisfied by the year of a quote date. The number itself still
+    has to be the same number.
+    """
+    years = set(other_bits.get("years") or ())
+    for item in other_bits.get("dates") or []:
+        if isinstance(item, dict) and item.get("year") is not None:
+            years.add(str(item["year"]))
+    widened = dict(other_bits)
+    widened["years"] = years
+    return _quantities_covered(core_bits, widened)
 
 
 def _quantities_covered(core_bits: dict, other_bits: dict) -> bool:
@@ -1351,6 +1386,10 @@ _KNOWN_ACRONYMS = {
     "who": "world health organization",
     "un": "united nations",
     "isro": "indian space research organisation",
+    # The UPI claim says "NPCI". The PIB page says the long name. The
+    # same table already does this for RBI. Without the pair, a tier-1
+    # quote of the corporation fails the entity check.
+    "npci": "national payments corporation of india",
     "nasa": "national aeronautics and space administration",
     "imf": "international monetary fund",
     "bbc": "british broadcasting corporation",

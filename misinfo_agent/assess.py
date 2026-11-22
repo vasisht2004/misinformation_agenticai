@@ -53,6 +53,15 @@ _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 
 # Shareable lines used only when the model returned nothing usable.
 # They restate the label the rule already chose. They do not add a fact.
+# The draft names the kind. The code names the verdict. A claim whose
+# whole point is one wrong date, number, or name is False: forwarding
+# it forwards the false fact. A real event with a side detail wrong,
+# or a fact that used to be true, is Misleading.
+_FALSE_KINDS = frozenset({"entirely_false", "single_fact_wrong"})
+_MISLEADING_KINDS = frozenset(
+    {"wrong_detail", "outdated", "partly_true", "out_of_context"}
+)
+
 _CORRECTION = {
     "False": "This claim does not match the sources we found. Please do not forward it.",
     "Misleading": "Part of this claim does not match the sources. Please do not forward it as written.",
@@ -66,7 +75,14 @@ class _AtomicDraft(BaseModel):
 
     atomic_id: str
     explanation: str = ""
-    refute_kind: Literal["entirely_false", "wrong_detail"] | None = None
+    refute_kind: Literal[
+        "entirely_false",
+        "single_fact_wrong",
+        "wrong_detail",
+        "outdated",
+        "partly_true",
+        "out_of_context",
+    ] | None = None
 
     @field_validator("refute_kind", mode="before")
     @classmethod
@@ -185,6 +201,10 @@ def assess(state: dict) -> dict:
         notes,
     )
     confidence = _confidence(state, verdict, core, _core_status(state))
+    # A weak refute is real evidence and not a tier 1-2 record. The cap
+    # is the ceiling for that path even when the logistic would sit higher.
+    if _weak_caveat(state) and verdict in {"False", "Misleading"}:
+        confidence = min(confidence, float(config.WEAK_REFUTE_CONFIDENCE_CAP))
     citations = _citations(explanations, true_version, what_we_found)
     # Set on every Unverifiable, including a thin table. A conflict still
     # has verdict None here; the non-blocking review turns that into
@@ -230,15 +250,15 @@ def _verdict(state: dict, kinds: dict[str, str | None], notes: list[str]) -> tup
     core = _core_id(state)
     core_status = _core_status(state)
     kind = kinds.get(core)
-    # The core was refuted, and the draft says the claim is invented
-    # rather than a real event with one wrong detail.
-    if core_status == "refuted" and kind == "entirely_false":
-        return "False", [], False
-    # The core was refuted, and the draft says a real event is under
-    # the wrong date, number, place, or name. Misleading tells a reader
-    # not to forward the wording, without saying the event never happened.
-    if core_status == "refuted" and kind == "wrong_detail":
-        return "Misleading", [], False
+    weak = _weak_caveat(state)
+    # entirely_false: the event did not happen. single_fact_wrong: the
+    # claim's main assertion is one date, number, or name, and it is
+    # wrong. Both are False. A side detail, an outdated fact, a partial
+    # truth, or a quote out of context is Misleading.
+    if core_status == "refuted" and kind in _FALSE_KINDS:
+        return "False", weak, False
+    if core_status == "refuted" and kind in _MISLEADING_KINDS:
+        return "Misleading", weak, False
     # Refuted, but the draft never said which kind. False is the harsher
     # label and it needs the explicit entirely_false mark. A missing mark
     # must not become that harsher label by default.
@@ -246,7 +266,7 @@ def _verdict(state: dict, kinds: dict[str, str | None], notes: list[str]) -> tup
         notes.append(
             f"{core} is refuted but refute_kind was missing, so the verdict is Misleading rather than False."
         )
-        return "Misleading", [], False
+        return "Misleading", weak, False
     others = _other_status(state, core)
     # The core and every other checkable part are supported. An empty
     # list of other parts is included: a single supported claim is True.
@@ -465,7 +485,7 @@ def _draft(state: dict, evidence: list[dict], notes: list[str]) -> _Draft | None
             prompt,
             _Draft,
             purpose="assess",
-            prompt_version="assess_v1",
+            prompt_version="assess_v2",
         )
     except LLMQuotaError:
         raise
@@ -477,7 +497,7 @@ def _draft(state: dict, evidence: list[dict], notes: list[str]) -> _Draft | None
 
 
 def _prompt(state: dict, evidence: list[dict]) -> str:
-    template = (config.PROMPTS_DIR / "assess_v1.txt").read_text(encoding="utf-8")
+    template = (config.PROMPTS_DIR / "assess_v2.txt").read_text(encoding="utf-8")
     # replace, not format: the instructions mention JSON braces.
     return (
         template.replace("__CLAIM__", str(state.get("claim") or ""))
@@ -868,17 +888,34 @@ def _best(state: dict) -> dict:
     return max(hits, key=lambda item: float(item.get("dense_cos") or 0.0))
 
 
+def _weak_caveat(state: dict) -> list[str]:
+    """The lower-tier sentence, only when that path actually decided.
+
+    The flag alone is not enough. A normal two-newsroom refute must not
+    wear this caveat or this cap.
+    """
+    if not config.GATE_WEAK_REFUTE:
+        return []
+    needle = config.WEAK_REFUTE_CAVEAT
+    if any(needle in str(item) for item in (state.get("gate_reasons") or [])):
+        return [needle]
+    return []
+
+
 def _rows_for(state: dict, atomic_id: str) -> list[dict]:
     """The same row filter the gate used, including the leakage switch.
 
     Confidence has to count the rows the verdict was built from. A page
-    the gate ignored as after-claim must not raise the score.
+    the gate ignored as after-claim must not raise the score. Shared-source
+    merging is applied here too, on copies, so the score sees the groups
+    the gate counted.
     """
-    return gate_box._rows(
+    rows = gate_box._rows(
         list(state.get("evidence") or []),
         atomic_id,
         drop_after=bool(config.EVAL_DROP_AFTER_CLAIM),
     )
+    return gate_box.counted_rows(rows)
 
 
 def _stats(state: dict) -> dict:

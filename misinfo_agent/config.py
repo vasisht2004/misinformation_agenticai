@@ -422,6 +422,40 @@ ACTION_SYNONYMS = {
 # reason names the host. False keeps the two-group refute rule.
 TIER1_SINGLE_REFUTE = True
 
+# Gate variants. All default off: the shipped rule stays "two independent
+# groups, at least one tier 1 or 2". A study may turn one on after the
+# selection rule in docs/eval_diagnosis.md has been applied on dev and
+# the winner has been scored once on test. Nothing here is fitted to a
+# claim. G0 in that study is every flag below left off.
+#
+# G2R. Three independent refutations and nobody on the other side can
+# refute the core even when every page is tier 3 or 4. Support is never
+# decided by a pile of lower-tier pages. The card says no tier 1-2 source
+# was found, and the confidence is capped, because the usual bar was not met.
+GATE_WEAK_REFUTE = True
+WEAK_REFUTE_MIN_GROUPS = 3
+WEAK_REFUTE_CONFIDENCE_CAP = 0.6
+WEAK_REFUTE_CAVEAT = "Lower-tier sources only: no tier 1-2 source was found."
+# G1. One tier-1 page from the office the claim is about can support or
+# refute on its own when no tier 1-2 group is on the other side. Any other
+# tier-1 site does not: a ministry page about a different subject is not
+# the body named in the sentence.
+GATE_PRIMARY_SOURCE = True
+# G3. Two outlets that repeat one press release are one source. Merging
+# them makes the gate stricter, not looser. A shared run of this many
+# words is a copied sentence; a shorter overlap is just the same topic.
+GATE_SHARED_SOURCE = True
+GATE_SHARED_QUOTE_WORDS = 12
+# G4. One number per group, summed. Tier weights are a principle: an
+# office is a full vote, a newsroom is close behind, an encyclopaedia is
+# about a third, and an unknown host is a small fraction. They were not
+# fit on the eval. Theta is chosen on dev from the grid and does nothing
+# while the flag is off. 1.0 is the middle of that grid, not a fitted result.
+GATE_EVIDENCE_SCORE = False
+GATE_EVIDENCE_THETA = 1.0
+GATE_EVIDENCE_THETA_GRID = (0.8, 1.0, 1.2, 1.5, 2.0)
+GATE_TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.35, 4: 0.15}
+
 # True is the old pause: review() calls interrupt() and the process waits.
 # False lets the run finish. The verdict stays provisional, the pending
 # row stays in the queue, and a person approves it later without a re-run.
@@ -542,6 +576,22 @@ TIER1_HOSTS = (
     "un.org",
     "imf.org",
     "worldbank.org",
+    # Indian offices that are not under .gov / .nic. A suffix rule never
+    # sees rbi.org.in, npci.org.in, or sansad.in, so a page from the bank,
+    # the payments corporation, or Parliament was scored as an unknown
+    # site. The .gov.in and .nic.in hosts are listed as well so the tier
+    # does not depend on the suffix table alone.
+    "rbi.org.in",
+    "npci.org.in",
+    "uidai.gov.in",
+    "isro.gov.in",
+    "rajbhasha.gov.in",
+    "legislative.gov.in",
+    "indiacode.nic.in",
+    "eci.gov.in",
+    "mea.gov.in",
+    "sebi.gov.in",
+    "sansad.in",
 )
 TIER2_HOSTS = (
     # Wires. PTI's English wire is ptinews.com. ANI, IANS, and UNI are the
@@ -668,12 +718,64 @@ TIER4_HOSTS = (
     "wordpress.com",
 )
 
+# Added to every domain's official query, after that domain's own hosts.
+# A claim such as "how many states does India have" is not filed under one
+# regulator, so the domain lists never asked the census or Know India.
+# PIB is repeated from the domain lists; the query builder drops the copy.
+# This changes searches from here on. The blocked-eval cache was stored
+# before these hosts were added, so a replay of that cache will not show them.
+NATIONAL_OFFICIAL_DOMAINS = (
+    "india.gov.in",
+    "knowindia.india.gov.in",
+    "mha.gov.in",
+    "censusindia.gov.in",
+    "pib.gov.in",
+    "mospi.gov.in",
+)
+
+# The office a claim is about. Used only by the G1 gate flag. A tier-1 host
+# counts as that office when the claim names it. The phrases are the public
+# name of the host, not strings copied from an eval claim. An acronym of
+# three letters or fewer has to appear in that capitalisation: "who" inside
+# "who won" is not the World Health Organization.
+PRIMARY_BODY_NAMES = {
+    "eci.gov.in": ("Election Commission of India", "Election Commission", "ECI"),
+    "pib.gov.in": ("Press Information Bureau", "PIB"),
+    "minorityaffairs.gov.in": ("Ministry of Minority Affairs",),
+    "mod.gov.in": ("Ministry of Defence", "Ministry of Defense"),
+    "mea.gov.in": ("Ministry of External Affairs", "MEA"),
+    "mha.gov.in": ("Ministry of Home Affairs", "MHA"),
+    "ncrb.gov.in": ("National Crime Records Bureau", "NCRB"),
+    "india.gov.in": ("National Portal of India",),
+    "knowindia.india.gov.in": ("Know India",),
+    "censusindia.gov.in": ("Census of India", "Registrar General"),
+    "mospi.gov.in": ("Ministry of Statistics", "MOSPI"),
+    "mohfw.gov.in": ("Ministry of Health", "MoHFW"),
+    "icmr.gov.in": ("Indian Council of Medical Research", "ICMR"),
+    "who.int": ("World Health Organization", "World Health Organisation", "WHO"),
+    "nih.gov": ("National Institutes of Health", "NIH"),
+    "ncbi.nlm.nih.gov": ("PubMed", "NCBI"),
+    "diabetes.org": ("American Diabetes Association",),
+    "idf.org": ("International Diabetes Federation", "IDF"),
+    "ndma.gov.in": ("National Disaster Management Authority", "NDMA"),
+    "mausam.imd.gov.in": ("India Meteorological Department", "IMD"),
+    "rbi.org.in": ("Reserve Bank of India", "RBI"),
+    "sebi.gov.in": ("Securities and Exchange Board of India", "SEBI"),
+    "incometax.gov.in": ("Income Tax Department",),
+    "mib.gov.in": ("Ministry of Information and Broadcasting",),
+    "yas.gov.in": ("Ministry of Youth Affairs and Sports",),
+    "dst.gov.in": ("Department of Science and Technology",),
+    "isro.gov.in": ("Indian Space Research Organisation", "Indian Space Research Organization", "ISRO"),
+    "meity.gov.in": ("Ministry of Electronics and Information Technology", "MeitY"),
+}
+
 # Primary sources for the official query, one tuple per domain. Box 7
 # restricts that one search to these hosts so a ministry page can outrank a
 # blog. PIB is on every list because government denials are posted there,
 # including for domains that have no single regulator. A domain with no
 # entry would skip the official query; all 11 have one. Hosts were checked
 # to answer over HTTPS on 11 Nov 2026 (a few apex names redirect to www).
+# NATIONAL_OFFICIAL_DOMAINS is appended to each tuple at query time.
 OFFICIAL_DOMAINS = {
     "Politics & elections": (
         # Rolls, results, and the model code of conduct.
@@ -703,8 +805,8 @@ OFFICIAL_DOMAINS = {
         "pib.gov.in",
     ),
     "Society & other": (
-        # Catch-all domain: the national portal is the only host that
-        # applies to any of it.
+        # Catch-all domain. The national list added to every official query
+        # supplies the census, home affairs, and Know India on top of these.
         "india.gov.in",
         "pib.gov.in",
     ),

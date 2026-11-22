@@ -45,10 +45,29 @@ def _card(state: dict) -> dict:
             "match_type": state.get("match_type") or "",
         }
     marks = state.get("run_marks") if isinstance(state.get("run_marks"), dict) else {}
+    leans = _leans(state)
+    explanation = state.get("explanation") or ""
+    # A conflict has no single verdict. The evidence rows already carry
+    # both stances; this sentence is what the hero shows when assess
+    # left the explanation empty, so neither lean is hidden.
+    if (
+        not explanation
+        and state.get("unverifiable_reason") == "conflicting_credible_sources"
+        and leans["supports"]
+        and leans["refutes"]
+    ):
+        explanation = (
+            "Sources lean both ways. Supports: "
+            + ", ".join(leans["supports"])
+            + ". Refutes: "
+            + ", ".join(leans["refutes"])
+            + "."
+        )
     return {
         "verdict": state.get("verdict"),
         "confidence": state.get("confidence"),
-        "explanation": state.get("explanation") or "",
+        "explanation": explanation,
+        "leans": leans,
         "explanations": explanations,
         # One entry per part, with the core flag. The page badges the
         # main claim from this list. explanations stays the shorter
@@ -86,6 +105,28 @@ def _card(state: dict) -> dict:
         "cost": _cost(state),
         "run_id": str(marks.get("run_id") or ""),
     }
+
+
+def _leans(state: dict) -> dict:
+    """Hosts on each side. The conflict card names both, not one."""
+    support: list[str] = []
+    refute: list[str] = []
+    seen_support: set[str] = set()
+    seen_refute: set[str] = set()
+    for row in state.get("evidence") or []:
+        if not isinstance(row, dict):
+            continue
+        host = str(row.get("netloc") or row.get("site") or "").strip()
+        if not host:
+            continue
+        stance = str(row.get("stance") or "")
+        if stance == "supports" and host not in seen_support:
+            seen_support.add(host)
+            support.append(host)
+        elif stance == "refutes" and host not in seen_refute:
+            seen_refute.add(host)
+            refute.append(host)
+    return {"supports": support, "refutes": refute}
 
 
 def _parts(state: dict) -> tuple[list[dict], list[dict]]:

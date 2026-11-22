@@ -9,6 +9,9 @@ least one of them is tier 1 or 2. One credible voice on the other side
 does not block that, unless it is a large minority or a tier 1 source.
 TRUE_NEEDS_CORE_MATCH and TIER1_SINGLE_REFUTE tighten the core only.
 With both off, the counts below are the older rule, unchanged.
+GATE_WEAK_REFUTE, GATE_PRIMARY_SOURCE, GATE_SHARED_SOURCE, and
+GATE_EVIDENCE_SCORE are extra paths. Each is off unless a study turned
+it on. Off, they do not change a count.
 A picture claim can be refuted by text and cannot be confirmed by it:
 the text never saw the file.
 
@@ -17,6 +20,10 @@ system failure. It is never reported as "not enough sources".
 """
 
 from __future__ import annotations
+
+import re
+from datetime import date, datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import misinfo_agent.config as config
 
@@ -195,10 +202,12 @@ def _core_id(atomics: list[dict]) -> str:
 def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[str], list[str]]:
     aid = str(atomic.get("id") or "A1")
     text = str(atomic.get("text") or "")
-    rows = _rows(state.get("evidence"), aid, drop_after=drop_after)
-    # Side claims keep the old count. The false Trues were pages that
-    # confirmed a detail of the headline, not the headline.
+    # all_rows still holds a support that only confirms a side detail.
+    # G2R's "nobody supports this" test has to see that page. The split
+    # below is what the support count uses, and it is unchanged.
+    all_rows = counted_rows(_rows(state.get("evidence"), aid, drop_after=drop_after))
     detail_ids: list[str] = []
+    rows = all_rows
     if config.TRUE_NEEDS_CORE_MATCH and _is_core(state, aid):
         rows, detail_ids = _split_core_supports(rows, text)
     groups = _groups(rows)
@@ -214,6 +223,13 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
     refute = groups["refute"]
     support_c = groups["support_credible"]
     refute_c = groups["refute_credible"]
+    # A count or an office held "now" goes stale. An undated ministry
+    # page, or one older than the other side's newest row, is still
+    # evidence. It is not a current record, so it cannot be the only
+    # credible vote. The note names the host so the card can show it.
+    present = _present_status(text)
+    stale_refute = _stale_sole_notes(rows, refute_c, "supports") if present else []
+    stale_support = _stale_sole_notes(rows, support_c, "refutes") if present else []
     conflicting, stray, because = _conflict(groups)
     if stray:
         # The phrase is fixed for the one-source case the rule names.
@@ -237,28 +253,64 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
                 "and the smaller side is at least a third of them."
             )
         reasons.insert(0, line)
+        reasons.extend(stale_refute)
+        reasons.extend(stale_support)
         return "conflicting", reasons, detail_ids
 
-    # One office, and nobody credible on the other side. Two blogs are
-    # still not enough: the group has to be tier 1.
+    # The early conflict test misses a majority of stale offices against
+    # one fresh newsroom: the newsroom is a small stray, and the offices
+    # would otherwise win. Both sides are still credible, so nobody wins.
+    if (stale_refute and support_c) or (stale_support and refute_c):
+        reasons.insert(
+            0,
+            f"{aid} is conflicting: credible sources are on both sides, "
+            "and an official page on one side may be outdated.",
+        )
+        reasons.extend(stale_refute)
+        reasons.extend(stale_support)
+        return "conflicting", reasons, detail_ids
+
+    # One office, and nobody on the other side at all. A tier-4 page is
+    # support. It does not have to be tier 1-2 to stop a single denial.
+    # Two blogs are still not enough to refute by themselves: the group
+    # has to be tier 1, and a present-tense page has to be current.
     if (
         config.TIER1_SINGLE_REFUTE
         and _is_core(state, aid)
         and len(refute) == 1
-        and len(support_c) == 0
+        and len(support) == 0
         and groups["tier"].get(refute[0]) == _TIER1
+        and not stale_refute
     ):
         host = _group_host(rows, refute[0])
         reasons.insert(0, f"single official denial: {host}")
         return "refuted", reasons, detail_ids
 
-    if len(refute) >= 2 and len(refute_c) >= 1:
+    if len(refute) >= 2 and len(refute_c) >= 1 and not stale_refute:
         reasons.insert(
             0,
             f"{aid} is refuted: {len(refute)} independent groups refute it, "
             f"and {len(refute_c)} of them are tier 1 or 2.",
         )
         return "refuted", reasons, detail_ids
+    if stale_refute:
+        # The only credible denial is a page that may no longer be current.
+        # A lower-tier companion does not make that page a second office.
+        reasons.extend(stale_refute)
+
+    # Three lower-tier denials, and not a single page on the other side.
+    # Checked after the credible-refute rule so a tier 1-2 source still
+    # uses the ordinary sentence and is not capped as a weak refute.
+    if config.GATE_WEAK_REFUTE and _is_core(state, aid):
+        weak = _weak_refute_groups(all_rows, text)
+        if len(weak) >= config.WEAK_REFUTE_MIN_GROUPS:
+            reasons.insert(
+                0,
+                f"{aid} is refuted: {len(weak)} independent groups refute it, "
+                "and none of them is tier 1 or 2.",
+            )
+            reasons.insert(1, config.WEAK_REFUTE_CAVEAT)
+            return "refuted", reasons, detail_ids
 
     picture = _picture(state, text)
     # The core needs two tier 1-2 supporters. A side claim, and the core
@@ -266,9 +318,9 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
     # second independent group.
     strict_support = config.TRUE_NEEDS_CORE_MATCH and _is_core(state, aid)
     supported = (
-        len(support_c) >= 2 and not picture
+        len(support_c) >= 2 and not picture and not stale_support
         if strict_support
-        else len(support) >= 2 and len(support_c) >= 1 and not picture
+        else len(support) >= 2 and len(support_c) >= 1 and not picture and not stale_support
     )
     if supported:
         if strict_support:
@@ -282,6 +334,44 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
             )
         reasons.insert(0, line)
         return "supported", reasons, detail_ids
+
+    # One office, speaking about itself. The count rules already had
+    # their chance. This does not fire when a tier 1-2 group is opposed,
+    # and it does not let text confirm a picture.
+    if config.GATE_PRIMARY_SOURCE and _is_core(state, aid):
+        primary = _primary_side(rows, groups, text)
+        if primary == "refutes" and not stale_refute:
+            host = _primary_host(rows, groups["refute"], text, "refutes")
+            reasons.insert(0, f"{aid} is refuted: {host} is the body this claim is about.")
+            return "refuted", reasons, detail_ids
+        if primary == "supports" and not picture and not stale_support:
+            host = _primary_host(rows, groups["support"], text, "supports")
+            reasons.insert(0, f"{aid} is supported: {host} is the body this claim is about.")
+            return "supported", reasons, detail_ids
+    if stale_support:
+        reasons.extend(stale_support)
+
+    # The score only decides a claim the counts left open. A conflict
+    # already returned. Support still needs a tier 1-2 group, which is
+    # the same asymmetry as the weak-refute path: a pile of blogs can
+    # refute and cannot confirm.
+    if config.GATE_EVIDENCE_SCORE and _is_core(state, aid):
+        score = evidence_score(state, rows, text)
+        theta = float(config.GATE_EVIDENCE_THETA)
+        if score <= -theta and not stale_refute:
+            reasons.insert(
+                0,
+                f"{aid} is refuted: the evidence score is {score:.2f}, "
+                f"at or below -{theta:.1f}.",
+            )
+            return "refuted", reasons, detail_ids
+        if score >= theta and len(support_c) >= 1 and not picture and not stale_support:
+            reasons.insert(
+                0,
+                f"{aid} is supported: the evidence score is {score:.2f}, "
+                f"at or above {theta:.1f}, and a tier 1 or 2 group supports it.",
+            )
+            return "supported", reasons, detail_ids
 
     picture_support = (
         len(support_c) >= 2
@@ -348,9 +438,11 @@ def _groups(rows: list[dict]) -> dict:
     buckets: dict[str, list[dict]] = {}
     order: list[str] = []
     for row in rows:
-        name = str(row.get("group_id") or row.get("group") or "").strip()
-        if not name:
-            name = f"row:{row.get('id') or len(order)}"
+        # Same label _row_group uses. A row with neither key stays its own
+        # group: two undated snippets must not become one outlet.
+        name = _row_group(row)
+        if name == "row:":
+            name = f"row:{len(order)}"
         if name not in buckets:
             order.append(name)
             buckets[name] = []
@@ -578,6 +670,527 @@ def _group_host(rows: list[dict], group_name: str) -> str:
             return url.split("/")[2]
         return group_name
     return group_name
+
+
+def counted_rows(rows: list[dict]) -> list[dict]:
+    """The rows the gate and the confidence score both count.
+
+    Shared-source merging rewrites group_id on copies. The stored evidence
+    is left alone, so a later variant or a replay of the same state still
+    sees the groups box 7 wrote. With the flag off this is the same list.
+    """
+    if not config.GATE_SHARED_SOURCE:
+        return rows
+    return _merge_shared_sources([dict(row) for row in rows if isinstance(row, dict)])
+
+
+def evidence_score(state: dict, rows: list[dict], core_text: str) -> float:
+    """S = sum over groups of tier weight, stance, cosine, recency, core match.
+
+    Stance is +1 for a support and -1 for a refute. A group that fails the
+    core match contributes nothing: a page about a side detail is not a
+    vote on the headline. Theta is applied by the caller. The weights live
+    in config and are not fitted.
+    """
+    grouped = _groups(rows)
+    claim_date = state.get("claim_date")
+    total = 0.0
+    for name in grouped["support"]:
+        total += _group_term(rows, name, 1.0, core_text, claim_date, grouped)
+    for name in grouped["refute"]:
+        total += _group_term(rows, name, -1.0, core_text, claim_date, grouped)
+    return total
+
+
+def refute_core_matches(quote: str, core: str, *, passage: str = "") -> bool:
+    """Relaxed core match for a denial.
+
+    A correction states a different figure. "28 states" is how a page
+    refutes "29 states". Requiring the quote to repeat 29 would drop every
+    numeric correction. The name and the verb still have to satisfy the
+    relaxed support rule. When that rule has nothing left to check, the
+    quote still has to share a content word with the claim, or any denial
+    of any sentence would pass.
+    """
+    from misinfo_agent.prior_match import (
+        _action_words,
+        _quote_and_sentence,
+        _relaxed_entity,
+        core_support_matches,
+    )
+
+    blanked = _NUMBER_TOKEN.sub(" ", str(core or ""))
+    if not core_support_matches(quote, blanked, passage=passage, mode="relaxed"):
+        return False
+    if _relaxed_entity(blanked) or _action_words(blanked):
+        return True
+    haystack = _quote_and_sentence(quote, passage).casefold()
+    words = [
+        word
+        for word in re.findall(r"[a-z]{4,}", str(core or "").casefold())
+        if word not in _CONTENT_STOP
+    ]
+    if not words:
+        return bool(str(quote or "").strip())
+    return any(re.search(rf"\b{re.escape(word)}\b", haystack) for word in words)
+
+
+def _weak_refute_groups(rows: list[dict], core_text: str) -> list[str]:
+    """Refuting groups that may convict the core without a tier 1-2 source.
+
+    Empty when any group supports, at any tier, or when a tier 1-2 group
+    already refutes (that case belongs to the ordinary rule). Every row in
+    a counted group has to pass the relaxed refute match. One off-topic
+    sentence inside the group drops the group.
+    """
+    grouped = _groups(rows)
+    if grouped["support"] or grouped["refute_credible"]:
+        return []
+    buckets = _named_buckets(rows)
+    passed = []
+    for name in grouped["refute"]:
+        members = [row for row in buckets.get(name, []) if row.get("stance") == "refutes"]
+        if not members:
+            continue
+        if all(
+            refute_core_matches(
+                str(row.get("quote") or ""),
+                core_text,
+                passage=str(row.get("passage") or ""),
+            )
+            for row in members
+        ):
+            passed.append(name)
+    return passed
+
+
+def _group_term(rows, name, sign, core_text, claim_date, grouped) -> float:
+    members = [row for row in rows if _row_group(row) == name]
+    if not members:
+        return 0.0
+    tier = grouped["tier"].get(name, 4)
+    weight = _tier_weight(tier)
+    cosines = [_row_cos(row) for row in members]
+    known = [value for value in cosines if value is not None]
+    # No stored cosine means this row was not a picked passage. It does
+    # not get a free similarity. Real evidence rows carry `cos`.
+    cosine = max(known) if known else 0.0
+    recency = _group_recency(members, claim_date)
+    if sign > 0:
+        matched = any(
+            _support_core_matches(row, core_text) for row in members if row.get("stance") == "supports"
+        )
+    else:
+        matched = any(
+            refute_core_matches(
+                str(row.get("quote") or ""),
+                core_text,
+                passage=str(row.get("passage") or ""),
+            )
+            for row in members
+            if row.get("stance") == "refutes"
+        )
+    core_match = 1.0 if matched else 0.0
+    return weight * sign * cosine * recency * core_match
+
+
+def _support_core_matches(row: dict, core_text: str) -> bool:
+    from misinfo_agent.prior_match import core_support_matches
+
+    return core_support_matches(
+        str(row.get("quote") or ""),
+        core_text,
+        passage=str(row.get("passage") or ""),
+        mode="relaxed",
+    )
+
+
+def _tier_weight(tier: int) -> float:
+    weights = config.GATE_TIER_WEIGHTS
+    try:
+        number = int(tier)
+    except (TypeError, ValueError):
+        number = 4
+    if number in weights:
+        return float(weights[number])
+    if number < 1:
+        return float(weights[1])
+    return float(weights[4])
+
+
+def _row_cos(row: dict) -> float | None:
+    try:
+        number = float(row.get("cos"))
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return min(1.0, max(0.0, number))
+
+
+def _group_recency(members: list[dict], claim_date) -> float:
+    """1 on the claim's own day, about half a year later, 0.5 if undated.
+
+    Half a year is not a fitted half-life. STALE_DAYS is already how long
+    a status claim may stand before box 6 asks for a fresh check, so a
+    page that old is half credit here too. An unknown date is half credit
+    rather than a zero: dropping it would treat "we could not date the
+    page" as "the page is irrelevant".
+    """
+    scored = []
+    for row in members:
+        value = _recency(row.get("published_date"), claim_date)
+        if value is not None:
+            scored.append(value)
+    if not scored:
+        return 0.5
+    return max(scored)
+
+
+def _recency(published, claim_date) -> float | None:
+    page = _parse_day(published)
+    claim = _parse_day(claim_date)
+    if page is None or claim is None:
+        return None
+    days = abs((claim - page).days)
+    window = float(config.STALE_DAYS) or 365.0
+    return 1.0 / (1.0 + days / window)
+
+
+def _parse_day(value) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+# Present-tense status, count, and office claims. "has 28" is a count.
+# "in total", "currently", "now", and "is the current" ask what is true
+# today. A founding year ("was established in 1935") does not match.
+_PRESENT_STATUS = re.compile(
+    r"\bhas\s+\d|\bis the current\b|\bnow\b|\btotal\b|\bcurrently\b",
+    re.IGNORECASE,
+)
+
+
+def _present_status(text: str) -> bool:
+    """True when the sentence is about a current count, status, or office."""
+    return _PRESENT_STATUS.search(str(text or "")) is not None
+
+
+def _stale_sole_notes(rows, credible_names, opposing_stance) -> list[str]:
+    """Notes when every credible group on this side is a stale tier-1 page.
+
+    Empty when any tier 1-2 group on this side is current. A newsroom
+    dated after the claim, sitting beside an old office page, means the
+    office is not the only credible vote, so this returns nothing.
+    """
+    if not credible_names:
+        return []
+    notes = []
+    for name in credible_names:
+        stale, host, label = _official_page_stale(rows, name, opposing_stance)
+        if not stale:
+            return []
+        notes.append(f"official page may be outdated: {host}, {label}")
+    return notes
+
+
+def _official_page_stale(rows, name, opposing_stance) -> tuple[bool, str, str]:
+    """Whether this group is a tier-1 page that cannot decide a present claim.
+
+    Undated is stale. A date older than the newest row on the other side
+    is stale. A tier 2-4 group is never this case. The label is the date
+    or the word undated, which is what the gate reason quotes.
+    """
+    members = [row for row in rows if _row_group(row) == name]
+    if not members or min(_tier(row) for row in members) > _TIER1:
+        return False, "", ""
+    host = _group_host(rows, name)
+    days = [
+        day
+        for day in (_parse_day(row.get("published_date") or row.get("date")) for row in members)
+        if day is not None
+    ]
+    if not days:
+        return True, host, "undated"
+    newest = max(days)
+    opposed = []
+    for row in rows:
+        if row.get("stance") != opposing_stance:
+            continue
+        day = _parse_day(row.get("published_date") or row.get("date"))
+        if day is not None:
+            opposed.append(day)
+    if opposed and newest < max(opposed):
+        return True, host, newest.isoformat()
+    return False, host, newest.isoformat()
+
+
+def _primary_side(rows: list[dict], groups: dict, claim_text: str) -> str | None:
+    """'supports' or 'refutes' when one tier-1 body-page stands alone.
+
+    A support stands alone when no tier 1-2 group refutes it. A refute
+    stands alone only when nothing supports the claim at any tier. A
+    blog on the supporting side is enough to stop a single official
+    denial; the two-group rule is what may still refute. A tier-1 page
+    whose host is not the body the sentence names does not count.
+    """
+    support_hit = _primary_host(rows, groups["support"], claim_text, "supports")
+    refute_hit = _primary_host(rows, groups["refute"], claim_text, "refutes")
+    if support_hit and not groups["refute_credible"]:
+        return "supports"
+    if refute_hit and not groups["support"]:
+        return "refutes"
+    return None
+
+
+def _primary_host(rows: list[dict], names: list[str], claim_text: str, stance: str) -> str | None:
+    """The host of a tier-1 group that is the body, and whose quote is about the claim.
+
+    A page from the right office about a different event does not count.
+    Support uses the relaxed support match. A refute may state a different
+    figure, which is refute_core_matches.
+    """
+    for name in names:
+        if not _group_tier_is_primary(rows, name):
+            continue
+        host = _group_host(rows, name)
+        if not _host_is_body(host, claim_text):
+            continue
+        members = [row for row in rows if _row_group(row) == name and row.get("stance") == stance]
+        if stance == "supports" and any(_support_core_matches(row, claim_text) for row in members):
+            return host
+        if stance == "refutes" and any(
+            refute_core_matches(
+                str(row.get("quote") or ""),
+                claim_text,
+                passage=str(row.get("passage") or ""),
+            )
+            for row in members
+        ):
+            return host
+    return None
+
+
+def _group_tier_is_primary(rows: list[dict], name: str) -> bool:
+    tiers = [_tier(row) for row in rows if _row_group(row) == name]
+    return bool(tiers) and min(tiers) <= _TIER1
+
+
+def _host_is_body(host: str, claim_text: str) -> bool:
+    """True when the claim names the office that publishes this host."""
+    names = _body_names(host)
+    if not names or not claim_text:
+        return False
+    for name in names:
+        if " " in name or len(name) >= 4:
+            if re.search(rf"\b{re.escape(name)}\b", claim_text, flags=re.IGNORECASE):
+                return True
+        elif re.search(rf"\b{re.escape(name)}\b", claim_text):
+            return True
+    return False
+
+
+def _body_names(host: str) -> tuple[str, ...]:
+    key = _bare_host(host)
+    table = config.PRIMARY_BODY_NAMES
+    if key in table:
+        return tuple(table[key])
+    for known, names in table.items():
+        if key.endswith("." + known):
+            return tuple(names)
+    return ()
+
+
+def _bare_host(host: str) -> str:
+    text = str(host or "").strip().lower()
+    if text.startswith("www."):
+        text = text[4:]
+    return text
+
+
+def _merge_shared_sources(rows: list[dict]) -> list[dict]:
+    """One group when two outlets repeat the same release.
+
+    Three signals, any one of them is enough, and they chain: a shared
+    12-word quotation, the same press-release URL, or the same wire
+    credit (PTI, ANI, or a PIB release) in the passage. Different wires
+    stay different sources. The earliest group id becomes the merged id
+    so the reason text does not depend on hash order.
+    """
+    if len(rows) < 2:
+        return rows
+    names = [_row_group(row) for row in rows]
+    parent = {name: name for name in names}
+
+    def find(name: str) -> str:
+        while parent[name] != name:
+            parent[name] = parent[parent[name]]
+            name = parent[name]
+        return name
+
+    def union(left: str, right: str) -> None:
+        ra, rb = find(left), find(right)
+        if ra == rb:
+            return
+        # Keep the name that appeared first. find() walks toward it.
+        if names.index(ra) <= names.index(rb):
+            parent[rb] = ra
+        else:
+            parent[ra] = rb
+
+    by_signal: dict[str, list[str]] = {}
+
+    def add(signal: str, name: str) -> None:
+        bucket = by_signal.setdefault(signal, [])
+        if name not in bucket:
+            bucket.append(name)
+
+    for row, name in zip(rows, names):
+        blob = f"{row.get('passage') or ''}\n{row.get('quote') or ''}"
+        for shingle in _quoted_shingles(row):
+            add("q:" + shingle, name)
+        for url in _press_urls(blob) | _press_urls(str(row.get("url") or "")):
+            add("u:" + url, name)
+        for agency in _agencies(blob):
+            add("a:" + agency, name)
+    for group_names in by_signal.values():
+        if len(group_names) < 2:
+            continue
+        head = group_names[0]
+        for other in group_names[1:]:
+            union(head, other)
+    merged = []
+    for row, name in zip(rows, names):
+        copied = dict(row)
+        copied["group_id"] = find(name)
+        merged.append(copied)
+    return merged
+
+
+def _quoted_shingles(row: dict) -> set[str]:
+    """12-word runs inside a quotation, not inside the whole article.
+
+    The evidence quote is a quotation the stance step already cut out.
+    A span in quotation marks inside the passage is the other place a
+    copied sentence shows up. The rest of the article can share a topic
+    without being the same release.
+    """
+    width = int(config.GATE_SHARED_QUOTE_WORDS)
+    texts = []
+    quote = str(row.get("quote") or "").strip()
+    if len(_words(quote)) >= width:
+        texts.append(quote)
+    passage = str(row.get("passage") or "")
+    for match in _QUOTED_SPAN.finditer(passage):
+        span = match.group(1) or match.group(2) or ""
+        if len(_words(span)) >= width:
+            texts.append(span)
+    found = set()
+    for text in texts:
+        words = _words(text)
+        for index in range(len(words) - width + 1):
+            found.add(" ".join(words[index:index + width]))
+    return found
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", str(text or "").casefold())
+
+
+def _press_urls(text: str) -> set[str]:
+    found = set()
+    for match in _URL.finditer(str(text or "")):
+        raw = match.group(0).rstrip(".,);]")
+        canonical = _canonical_url(raw)
+        if canonical and _is_press_url(canonical):
+            found.add(canonical)
+    return found
+
+
+def _canonical_url(raw: str) -> str:
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return ""
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=False)
+        if not key.lower().startswith("utm")
+    ]
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit(("https", host, path, urlencode(query), ""))
+
+
+def _is_press_url(url: str) -> bool:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    path = (parts.path or "").casefold()
+    if host == "pib.gov.in" or host.endswith(".pib.gov.in"):
+        return True
+    if "press-release" in path or "pressrelease" in path:
+        return True
+    return "prid=" in (parts.query or "").casefold()
+
+
+def _agencies(text: str) -> set[str]:
+    """Wire credits. PIB counts only when the sentence calls it a release.
+
+    PTI and ANI are the credits a newsroom puts on a copied wire. A passing
+    mention of the bureau, without 'release', is not that credit: plenty of
+    pages name PIB without reprinting one note.
+    """
+    found = set()
+    if re.search(r"\bPTI\b", text or ""):
+        found.add("PTI")
+    if re.search(r"\bANI\b", text or ""):
+        found.add("ANI")
+    if re.search(r"\bPIB\b", text or "") and re.search(r"\brelease\b", text or "", flags=re.IGNORECASE):
+        found.add("PIB")
+    if re.search(r"\bpress information bureau\b", text or "", flags=re.IGNORECASE):
+        found.add("PIB")
+    return found
+
+
+def _named_buckets(rows: list[dict]) -> dict[str, list[dict]]:
+    buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        buckets.setdefault(_row_group(row), []).append(row)
+    return buckets
+
+
+def _row_group(row: dict) -> str:
+    name = str(row.get("group_id") or row.get("group") or "").strip()
+    if name:
+        return name
+    return f"row:{row.get('id') or id(row)}"
+
+
+# "total" stays. It is a content word of a count ("29 states in total").
+# The function words are how the sentence is glued together.
+_CONTENT_STOP = frozenset({
+    "that", "this", "with", "from", "have", "been", "were", "will",
+    "into", "over", "under", "than", "then", "their", "there", "about",
+    "after", "before", "which", "would", "could", "should",
+})
+_NUMBER_TOKEN = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_QUOTED_SPAN = re.compile(r"[\"“]([^\"”]{0,500})[\"”]|[«]([^»]{0,500})[»]")
+_URL = re.compile(r"https?://[^\s<>\"]+")
 
 
 def unverifiable_reason(state: dict) -> str:

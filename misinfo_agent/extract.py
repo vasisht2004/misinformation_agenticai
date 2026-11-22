@@ -45,6 +45,31 @@ _MOTIVE = re.compile(
     r"media won'?t show|to protect (?:pharma|pharmaceutical))\b",
     re.IGNORECASE,
 )
+# The model called "India has 28 states and 8 union territories" an
+# opinion. A count plus "has" is a fact a page can confirm. These are
+# the verbs that make a sentence a claim, and the phrases that make it
+# a view. The guard runs only when the model said opinion.
+_FACT_VERB = re.compile(
+    r"\b(?:has|have|is|are|was|were|established|launched|introduced|announced)\b"
+    r"|\bcame into effect\b",
+    re.IGNORECASE,
+)
+_OPINION_MARK = re.compile(
+    r"\bi think\b|\b(?:should|best|worst|beautiful|deserve|must)\b",
+    re.IGNORECASE,
+)
+_NUMBER_OR_DATE = re.compile(
+    r"\d|(?:\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b)|"
+    r"\b(?:january|february|march|april|may|june|july|august|september|"
+    r"october|november|december)\b",
+    re.IGNORECASE,
+)
+# Sentence-initial "The" is not a named body. A capital word outside
+# this list is the entity the fact guard is allowed to count.
+_NOT_AN_ENTITY = frozenset(
+    {"the", "a", "an", "this", "that", "it", "there", "in", "on", "for", "and"}
+)
 
 
 class AtomicClaim(BaseModel):
@@ -163,6 +188,11 @@ def _other(reason: str, state: dict) -> dict:
 def _guard(state: dict, parsed: ExtractResult) -> dict:
     flags, style_flags = _merge_flags(parsed.red_flags, state.get("style_signals") or {})
     if not parsed.checkable:
+        # A joke or a greeting stays Other. An opinion that is actually a
+        # dated or numbered fact is a claim, and stopping here would never
+        # search it. The note is how a later reader sees the override.
+        if _opinion_overruled(state, parsed):
+            return _fact_from_opinion(state, flags, style_flags)
         result = _other(parsed.not_checkable_reason or "not checkable", state)
         # The model's own red flags stay. _other also folded the style
         # signals, so a shouted joke still shows its warning signs.
@@ -204,6 +234,68 @@ def _guard(state: dict, parsed: ExtractResult) -> dict:
         "visual_description": visual,
         "location_clues": location,
         "time_clues": when,
+    }
+
+
+def _opinion_overruled(state: dict, parsed: ExtractResult) -> bool:
+    """True when the model said opinion and the text is a checkable fact.
+
+    The reason has to mention opinion. A greeting the model called
+    "too short" is not this case. The text has to carry a number, a
+    date, or a named thing, and a factual verb, and none of the
+    opinion phrases. One of those missing means the model's label stands.
+    """
+    reason = (parsed.not_checkable_reason or "").casefold()
+    if "opinion" not in reason:
+        return False
+    return _looks_like_fact(_submission_text(state))
+
+
+def _looks_like_fact(text: str) -> bool:
+    if not text or _OPINION_MARK.search(text):
+        return False
+    if not _FACT_VERB.search(text):
+        return False
+    if _NUMBER_OR_DATE.search(text):
+        return True
+    for word in re.findall(r"\b[A-Z][A-Za-z]{1,}\b", text):
+        if word.casefold() not in _NOT_AN_ENTITY:
+            return True
+    return False
+
+
+def _submission_text(state: dict) -> str:
+    return " ".join(str(state.get("text") or "").split())
+
+
+def _fact_from_opinion(state: dict, flags: list[str], style_flags: list[str]) -> dict:
+    """A checkable claim built from the submission, not from the model.
+
+    The model returned no claim. The sentence the reader forwarded is
+    the claim. One atomic, marked core, so box 7 has something to search.
+    Domain is the leftover label: the model declined to pick one, and
+    inventing Politics for a sentence about states would be a guess.
+    """
+    claim = _submission_text(state)
+    words = claim.split()
+    if len(words) > 30:
+        claim = " ".join(words[:30])
+    return {
+        "checkable": True,
+        "not_checkable_reason": "",
+        "claim": claim,
+        "atomic_claims": [
+            {"id": "A1", "text": claim, "core": True, "checkable": True}
+        ],
+        "entities": _empty_entities(),
+        "domain": "Society & other",
+        "red_flags": flags,
+        "style_flags": style_flags,
+        "extract_notes": ["opinion overruled by fact guard"],
+        "headline_body_mismatch": "",
+        "visual_description": "",
+        "location_clues": "",
+        "time_clues": "",
     }
 
 

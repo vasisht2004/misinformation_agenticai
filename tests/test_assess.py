@@ -146,6 +146,36 @@ def test_core_refuted_wrong_detail_is_misleading():
     assert out["needs_human"] is False
 
 
+def test_refute_kind_maps_false_and_misleading():
+    # The main assertion being one wrong fact is False. A side detail,
+    # an old truth, a partial truth, and a quote pulled from somewhere
+    # else are Misleading. Each kind is its own draft.
+    state = _ready(
+        [_refutes(1, "a.com", 1), _refutes(2, "b.com", 2)],
+        [_claim("A1", "The bank opened in 1947.", core=True)],
+    )
+    expected = {
+        "entirely_false": "False",
+        "single_fact_wrong": "False",
+        "wrong_detail": "Misleading",
+        "outdated": "Misleading",
+        "partly_true": "Misleading",
+        "out_of_context": "Misleading",
+    }
+    for kind, verdict in expected.items():
+        _draft(
+            [
+                {
+                    "atomic_id": "A1",
+                    "explanation": "The rows disagree with the claim [E1].",
+                    "refute_kind": kind,
+                }
+            ]
+        )
+        out = assess(state)
+        assert out["verdict"] == verdict, kind
+
+
 def test_supported_core_and_supported_rest_is_true():
     evidence = [
         _supports(1, "a.com", 2, atomic="A1"),

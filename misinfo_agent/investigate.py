@@ -2502,12 +2502,24 @@ def _without_media(text: str) -> str:
 
 
 def _official_domains(domain) -> list[str] | None:
+    """The domain's own offices, then the national list, without duplicates.
+
+    The national hosts are how a claim that belongs to no single regulator
+    still gets a government page. They are appended, not written into every
+    tuple, so a domain keeps its own order and a host already on that list
+    is not searched twice. An unknown domain still skips the official line.
+    """
     if not isinstance(domain, str):
         return None
     mapping = config.OFFICIAL_DOMAINS.get(domain)
     if not mapping:
         return None
-    return [str(host) for host in mapping]
+    seen: list[str] = []
+    for host in tuple(mapping) + tuple(config.NATIONAL_OFFICIAL_DOMAINS):
+        text = str(host).strip()
+        if text and text not in seen:
+            seen.append(text)
+    return seen
 
 
 def _lead_text(state: dict) -> str | None:

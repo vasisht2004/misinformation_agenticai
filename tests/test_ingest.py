@@ -591,3 +591,36 @@ def test_sample_rbi_forward_matches_the_fixture_hash(tmp_path):
         "c9c4b414c2739182479b83b46a5fff47007d8393071d10ecf8b421aee70d6d98"
     )
     assert out["checkable_hint"] is True
+
+
+def test_short_english_aadhaar_sentences_stay_in_scope(tmp_path, monkeypatch):
+    # langdetect labels both of these Afrikaans at probability 1. A short
+    # English sentence must not be thrown out. Devanagari and Hinglish
+    # are covered by the tests above and must keep their own results.
+    from misinfo_agent.ingest import _language
+
+    for sentence in (
+        "An Aadhaar number has 12 digits.",
+        "An Aadhaar number has 16 digits.",
+    ):
+        out = ingest(sentence, db_path=tmp_path / "aadhaar.db")
+        assert out["language"] == "en"
+        assert out["checkable_hint"] is True
+        assert out["checkable_reason"] in ("", None)
+    # An unsure label is not a language, even with no English function words.
+    monkeypatch.setattr(
+        "misinfo_agent.ingest._detect_lang_prob",
+        lambda _text: ("de", 0.50),
+    )
+    code, hinglish, reason = _language("Berlin weather stays cold today")
+    assert code == "en"
+    assert hinglish is False
+    assert reason is None
+    # A sure label on a Latin sentence with no English function words still rejects.
+    monkeypatch.setattr(
+        "misinfo_agent.ingest._detect_lang_prob",
+        lambda _text: ("de", 0.99),
+    )
+    code, hinglish, reason = _language("Berlin weather stays cold today")
+    assert code == "de"
+    assert reason == "out of scope (not English)"

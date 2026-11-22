@@ -102,7 +102,13 @@ def test_query_kinds_for_every_domain():
             "official",
         ]
         official = plain[-1]
-        assert official.include_domains == list(config.OFFICIAL_DOMAINS[domain])
+        domain_hosts = list(config.OFFICIAL_DOMAINS[domain])
+        # The domain's own offices stay first. The national list is added
+        # once, so a host already on the domain list is not repeated.
+        assert official.include_domains[: len(domain_hosts)] == domain_hosts
+        for host in config.NATIONAL_OFFICIAL_DOMAINS:
+            assert host in official.include_domains
+        assert len(official.include_domains) == len(set(official.include_domains))
         # Keywords, not the sentence, and not the verify line's question.
         assert official.text != plain[0].text
         assert "true or false" not in official.text.casefold()
@@ -216,6 +222,26 @@ def test_health_official_query_includes_cure_sources():
         assert host in hosts
 
 
+def test_society_official_query_includes_national_sources():
+    # The national list is part of every domain's official query, including
+    # the catch-all. These hosts are how a "how many states" claim can reach
+    # the census and Know India. A future search uses this list. The blocked
+    # eval cache was stored before it, so that cache does not grow these hosts.
+    national = (
+        "india.gov.in",
+        "knowindia.india.gov.in",
+        "mha.gov.in",
+        "censusindia.gov.in",
+        "pib.gov.in",
+        "mospi.gov.in",
+    )
+    official = {query.kind: query for query in build_queries(_state("Society & other"))}["official"]
+    for host in national:
+        assert host in official.include_domains
+    assert official.include_domains.count("india.gov.in") == 1
+    assert official.include_domains.count("pib.gov.in") == 1
+
+
 def test_submitted_url_is_dropped_from_search_and_evidence():
     from misinfo_agent.investigate import build_evidence
 
@@ -321,9 +347,10 @@ def test_verify_and_refute_use_the_planned_wording():
     assert "2016" in by_kind["verify"].text
     assert "1 December" in by_kind["verify"].text
     assert by_kind["refute"].text.endswith("fake OR false OR hoax OR misleading")
-    assert by_kind["official"].include_domains == list(
-        config.OFFICIAL_DOMAINS["Finance & scams"]
-    )
+    finance_hosts = list(config.OFFICIAL_DOMAINS["Finance & scams"])
+    assert by_kind["official"].include_domains[: len(finance_hosts)] == finance_hosts
+    for host in config.NATIONAL_OFFICIAL_DOMAINS:
+        assert host in by_kind["official"].include_domains
     # Entities, then the longest content words. Not the sentence, and not
     # "true or false", which is only the verify line.
     assert (
