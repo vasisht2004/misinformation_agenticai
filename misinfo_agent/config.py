@@ -9,6 +9,7 @@ Paths are anchored to this file, not to the process cwd. pytest, the CLI and
 an IDE launch from different directories; the parquet files do not move.
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Repo root is the parent of misinfo_agent/. Parents[0] is the package dir.
@@ -284,10 +285,15 @@ SEARCH_CACHE = True
 SEARCH_CACHE_DIR = DATA_DIR / "cache" / "search"
 
 # Real Tavily HTTP calls this UTC month. Cached and fake calls do not count.
-# 800 stays under a typical free-tier month with room for the eval. The
-# count file is data/cache/search_monthly_count.json, next to the cache
-# directory so wiping cached pages does not wipe the bill.
-TAVILY_MONTHLY_MAX = 800
+# Tavily dashboard 22 Nov: 709/1000 real credits used; our counter read 800
+# (it over-counts). 1000 = 800 + 200 → leaves ~30 real credits of margin.
+# Revert to 800 on 1 Dec. The count file is
+# data/cache/search_monthly_count.json, next to the cache directory so
+# wiping cached pages does not wipe the bill. The counter itself resets
+# with the UTC month, so the extra 200 is only for the rest of November.
+# A process that imported this before 1 Dec keeps 1000 until it restarts.
+_TAVILY_CAP_REVERTS = datetime(2026, 12, 1, tzinfo=timezone.utc)
+TAVILY_MONTHLY_MAX = 800 if datetime.now(timezone.utc) >= _TAVILY_CAP_REVERTS else 1000
 
 # Real searches one claim may start. The fixed plan is at most 5 queries,
 # so 8 leaves room for a retry without letting one claim spend the month.
