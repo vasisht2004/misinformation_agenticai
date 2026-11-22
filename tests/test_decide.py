@@ -118,3 +118,38 @@ def test_style_does_not_change_the_decision_once_priority_is_set():
     }))
     assert quiet["decision"] == loud["decision"] == "alert"
     assert quiet["p_star"] == loud["p_star"]
+    assert "provisional" not in quiet
+
+
+def test_open_review_keeps_the_decision_and_marks_the_card():
+    from misinfo_agent.decide import open_review
+
+    alert = _state(verdict="False", priority="High", confidence=0.9)
+    decision = decide(alert)
+    assert decision["decision"] == "alert"
+    shown = open_review({**alert, **decision})
+    assert shown["provisional"] is True
+    assert shown["alert_pending_approval"] is True
+    assert shown["review_status"] == "pending"
+    assert shown["needs_human"] is True
+    assert shown["review_reason"] == "High priority False verdict: verify before alerting"
+    assert "decision" not in shown
+
+    human = open_review({**_state(verdict="True", priority="Medium"), "decision": "human", "gate": "sufficient"})
+    assert human["provisional"] is True
+    assert human["verdict"] if "verdict" in human else True
+    assert "verify before this is shared" in human["review_reason"]
+
+    conflict = open_review({
+        "verdict": None, "gate": "conflicting", "decision": "human", "priority": "High",
+    })
+    assert conflict["verdict"] == "Unverifiable"
+    assert conflict["unverifiable_reason"] == "conflicting_credible_sources"
+    assert conflict["provisional"] is False
+
+    broken = open_review({"verdict": None, "gate": "error", "decision": "human", "priority": "Low"})
+    assert broken["verdict"] == "Unverifiable"
+    assert broken["unverifiable_reason"] == "error"
+
+    stored = decide(_state(verdict="True", confidence=0.99, priority="High"))
+    assert stored["decision"] == "store"

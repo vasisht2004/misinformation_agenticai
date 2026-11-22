@@ -7,6 +7,8 @@ groups. It does not re-decide what a page said.
 A claim is enough when two independent groups take the same side and at
 least one of them is tier 1 or 2. One credible voice on the other side
 does not block that, unless it is a large minority or a tier 1 source.
+TRUE_NEEDS_CORE_MATCH and TIER1_SINGLE_REFUTE tighten the core only.
+With both off, the counts below are the older rule, unchanged.
 A picture claim can be refuted by text and cannot be confirmed by it:
 the text never saw the file.
 
@@ -48,6 +50,7 @@ def gate(state: dict) -> dict:
     statuses: dict[str, str] = {}
     reasons: list[str] = []
     judged: dict[str, dict] = {}
+    core_detail_ids: list[str] = []
     for atomic in atomics:
         aid = str(atomic.get("id") or "A1")
         if atomic.get("checkable") is False:
@@ -58,10 +61,12 @@ def gate(state: dict) -> dict:
                 f"{aid} is not checkable, so no source is asked to confirm it."
             )
             continue
-        status, lines = _judge(state, atomic, drop_after=drop_after)
+        status, lines, detail_ids = _judge(state, atomic, drop_after=drop_after)
         statuses[aid] = status
         reasons.extend(lines)
         judged[aid] = {"status": status}
+        if aid == _core_id(atomics):
+            core_detail_ids = detail_ids
 
     core_id = _core_id(atomics)
     core_status = statuses.get(core_id, "insufficient")
@@ -71,6 +76,10 @@ def gate(state: dict) -> dict:
         "gate": decision,
         "gate_reasons": reasons,
         "atomic_status": statuses,
+        # Empty when the flag is off, and when every support quote did
+        # match the core. The card lists these so a detail is not read
+        # as confirmation of the headline.
+        "core_detail_only_ids": core_detail_ids,
     }
     if rounds is not None:
         out["rounds"] = rounds
@@ -101,6 +110,7 @@ def _skip(state: dict) -> dict:
         "gate": "skipped",
         "gate_reasons": [reason],
         "atomic_status": {},
+        "core_detail_only_ids": [],
     }
 
 
@@ -129,6 +139,7 @@ def _failed_stance(state: dict) -> dict:
                 "Another search is allowed."
             ],
             "atomic_status": {},
+            "core_detail_only_ids": [],
         }
     return {
         "gate": "error",
@@ -137,6 +148,7 @@ def _failed_stance(state: dict) -> dict:
             "This is a system failure, not a lack of evidence."
         ],
         "atomic_status": {},
+        "core_detail_only_ids": [],
     }
 
 
@@ -180,10 +192,15 @@ def _core_id(atomics: list[dict]) -> str:
     return str(atomics[0].get("id") or "A1")
 
 
-def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[str]]:
+def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[str], list[str]]:
     aid = str(atomic.get("id") or "A1")
     text = str(atomic.get("text") or "")
     rows = _rows(state.get("evidence"), aid, drop_after=drop_after)
+    # Side claims keep the old count. The false Trues were pages that
+    # confirmed a detail of the headline, not the headline.
+    detail_ids: list[str] = []
+    if config.TRUE_NEEDS_CORE_MATCH and _is_core(state, aid):
+        rows, detail_ids = _split_core_supports(rows, text)
     groups = _groups(rows)
     reasons: list[str] = []
     for name in groups["conflict"]:
@@ -220,7 +237,20 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
                 "and the smaller side is at least a third of them."
             )
         reasons.insert(0, line)
-        return "conflicting", reasons
+        return "conflicting", reasons, detail_ids
+
+    # One office, and nobody credible on the other side. Two blogs are
+    # still not enough: the group has to be tier 1.
+    if (
+        config.TIER1_SINGLE_REFUTE
+        and _is_core(state, aid)
+        and len(refute) == 1
+        and len(support_c) == 0
+        and groups["tier"].get(refute[0]) == _TIER1
+    ):
+        host = _group_host(rows, refute[0])
+        reasons.insert(0, f"single official denial: {host}")
+        return "refuted", reasons, detail_ids
 
     if len(refute) >= 2 and len(refute_c) >= 1:
         reasons.insert(
@@ -228,18 +258,37 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
             f"{aid} is refuted: {len(refute)} independent groups refute it, "
             f"and {len(refute_c)} of them are tier 1 or 2.",
         )
-        return "refuted", reasons
+        return "refuted", reasons, detail_ids
 
     picture = _picture(state, text)
-    if len(support) >= 2 and len(support_c) >= 1 and not picture:
-        reasons.insert(
-            0,
-            f"{aid} is supported: {len(support)} independent groups support it, "
-            f"and {len(support_c)} of them are tier 1 or 2.",
-        )
-        return "supported", reasons
+    # The core needs two tier 1-2 supporters. A side claim, and the core
+    # when the flag is off, still accepts one credible group plus any
+    # second independent group.
+    strict_support = config.TRUE_NEEDS_CORE_MATCH and _is_core(state, aid)
+    supported = (
+        len(support_c) >= 2 and not picture
+        if strict_support
+        else len(support) >= 2 and len(support_c) >= 1 and not picture
+    )
+    if supported:
+        if strict_support:
+            line = (
+                f"{aid} is supported: {len(support_c)} independent tier 1 or 2 groups support it."
+            )
+        else:
+            line = (
+                f"{aid} is supported: {len(support)} independent groups support it, "
+                f"and {len(support_c)} of them are tier 1 or 2."
+            )
+        reasons.insert(0, line)
+        return "supported", reasons, detail_ids
 
-    if picture and len(support) >= 2 and len(support_c) >= 1:
+    picture_support = (
+        len(support_c) >= 2
+        if strict_support
+        else len(support) >= 2 and len(support_c) >= 1
+    )
+    if picture and picture_support:
         # Text can still refute this claim, which is why the refute
         # branch above is allowed to win. It must not confirm the file.
         reasons.insert(0, _PICTURE_BLOCK)
@@ -247,7 +296,7 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
             1,
             f"{aid} has {len(support)} supporting groups, but they only describe the picture.",
         )
-        return "insufficient", reasons
+        return "insufficient", reasons, detail_ids
 
     reasons.insert(
         0,
@@ -255,7 +304,7 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
         f"{_side(len(support), 'group supports', 'groups support')} it and "
         f"{_side(len(refute), 'group refutes', 'groups refute')} it.",
     )
-    return "insufficient", reasons
+    return "insufficient", reasons, detail_ids
 
 
 def _rows(evidence, atomic_id: str, *, drop_after: bool) -> list[dict]:
@@ -475,3 +524,140 @@ def _tier(row: dict) -> int:
         return int(row.get("tier"))
     except (TypeError, ValueError):
         return 4
+
+
+def _is_core(state: dict, atomic_id: str) -> bool:
+    for item in state.get("atomic_claims") or []:
+        if isinstance(item, dict) and str(item.get("id") or "A1") == atomic_id:
+            return item.get("core") is not False
+    return atomic_id == "A1"
+
+
+def _split_core_supports(rows: list[dict], core_text: str) -> tuple[list[dict], list[str]]:
+    """Drop support quotes that do not carry the core's key terms.
+
+    CORE_MATCH_MODE picks the matcher. "strict" demands the full name and
+    the exact verb on the quote. "relaxed" allows a surname or a synonym
+    and may use the sentence around the quote. Both still require the
+    core's numbers and dates, and both still need two tier 1-2 groups
+    before the core counts as supported. A refute is unchanged.
+    """
+    from misinfo_agent.prior_match import core_support_matches
+
+    kept = []
+    detail_ids = []
+    for row in rows:
+        if row.get("stance") == "supports" and not core_support_matches(
+            str(row.get("quote") or ""),
+            core_text,
+            passage=str(row.get("passage") or ""),
+        ):
+            evidence_id = str(row.get("id") or "").strip()
+            if evidence_id:
+                detail_ids.append(evidence_id)
+            continue
+        kept.append(row)
+    return kept, detail_ids
+
+
+def _group_host(rows: list[dict], group_name: str) -> str:
+    """The site named in the single-denial sentence.
+
+    netloc is what a reader can check. The group id is the fallback
+    because older rows stored the host there and left netloc empty.
+    """
+    for row in rows:
+        name = str(row.get("group_id") or row.get("group") or "").strip()
+        if name != group_name:
+            continue
+        host = str(row.get("netloc") or "").strip()
+        if host:
+            return host
+        url = str(row.get("url") or "")
+        if "://" in url:
+            return url.split("/")[2]
+        return group_name
+    return group_name
+
+
+def unverifiable_reason(state: dict) -> str:
+    """Why a finished Unverifiable was not graded.
+
+    First match, same order as the diagnosis: a broken stance call, a
+    real disagreement, no usable pages, no tier 1-2 after the official
+    query, only weaker pages, or exactly one credible group. A picture
+    the text cannot confirm has no code of its own; it falls through to
+    the same thin-evidence labels.
+    """
+    gate_name = state.get("gate")
+    if gate_name == "error":
+        return "error"
+    if gate_name == "conflicting":
+        return "conflicting_credible_sources"
+    atomics = _atomics(state)
+    core = _core_id(atomics)
+    drop_after = bool(config.EVAL_DROP_AFTER_CLAIM)
+    raw = _rows(state.get("evidence"), core, drop_after=drop_after)
+    # No support and no refute at all. A detail-only row is still a page,
+    # so it must not be reported as "nothing came back".
+    if not raw:
+        return "no_hits"
+    rows = raw
+    if config.TRUE_NEEDS_CORE_MATCH:
+        rows, _ignored = _split_core_supports(rows, _core_text(state, core))
+    usable = [
+        row for row in rows
+        if str(row.get("passage") or row.get("quote") or "").strip()
+    ]
+    groups = _groups(rows)
+    credible = len(groups["support_credible"]) + len(groups["refute_credible"])
+    if credible == 0:
+        if official_query_ran(state):
+            return "no_credible_record"
+        # Pages came back, and none of them is tier 1 or 2 on this claim.
+        # A quote that only matched a detail is in this bucket too.
+        return "only_tier34"
+    support_c = len(groups["support_credible"])
+    refute_c = len(groups["refute_credible"])
+    larger = max(support_c, refute_c)
+    smaller = min(support_c, refute_c)
+    if larger == 1 and smaller == 0:
+        return "single_credible"
+    if not usable:
+        return "no_hits"
+    return "only_tier34"
+
+
+def _core_text(state: dict, core_id: str) -> str:
+    for item in state.get("atomic_claims") or []:
+        if isinstance(item, dict) and str(item.get("id") or "") == core_id:
+            return str(item.get("text") or state.get("claim") or "")
+    return str(state.get("claim") or "")
+
+
+def official_query_ran(state: dict) -> bool:
+    """True when the official line was actually searched.
+
+    A passage tagged official means a page came back. A stored query
+    whose text is the official line means the search was issued even
+    when it returned nothing. Planning the line is not the same thing:
+    a cap can stop the run before that query starts.
+    """
+    for passage in state.get("passages") or []:
+        if isinstance(passage, dict) and "official" in (passage.get("query_kinds") or []):
+            return True
+    stats = state.get("investigate_stats") if isinstance(state.get("investigate_stats"), dict) else {}
+    texts = []
+    for item in stats.get("queries") or []:
+        if isinstance(item, dict) and item.get("kind") == "official":
+            return True
+        if isinstance(item, str) and item.strip():
+            texts.append(item)
+    if not texts:
+        return False
+    from misinfo_agent.investigate import build_queries
+
+    for query in build_queries(state):
+        if query.kind == "official" and query.text in texts:
+            return True
+    return False

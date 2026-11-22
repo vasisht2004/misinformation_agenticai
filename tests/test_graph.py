@@ -77,6 +77,14 @@ def _page(url, marker, stance_word, salt=None):
 @pytest.fixture
 def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "PAGE_CACHE_DIR", tmp_path / "pages")
+    # These route tests were written against the pause and the older
+    # evidence bar. The fake quotes are not the claim's key terms, and
+    # the tests assert interrupt(). The new defaults are covered in
+    # test_gate, test_decide, and test_nonblocking_alert_finishes.
+    monkeypatch.setattr(config, "HUMAN_BLOCKING", True)
+    monkeypatch.setattr(config, "ASSISTED_LEAN", False)
+    monkeypatch.setattr(config, "TRUE_NEEDS_CORE_MATCH", False)
+    monkeypatch.setattr(config, "TIER1_SINGLE_REFUTE", False)
     import misinfo_agent.investigate as investigate
 
     monkeypatch.setattr(investigate, "get_encoder", lambda: _Encoder())
@@ -417,3 +425,82 @@ def test_pending_review_is_written_on_interrupt_and_removed_on_resume(offline, m
     assert done["result"]["human_action"] == "approve"
     assert list_pending(tmp_path / "audit.db") == []
     assert _audit_rows(tmp_path)[0]["human_action"] == "approve"
+
+
+def test_nonblocking_alert_finishes_and_apply_review_approves(offline, monkeypatch, tmp_path):
+    """The run ends. The alert is not sent. Approving does not call the model."""
+    monkeypatch.setattr(config, "HUMAN_BLOCKING", False)
+    calls = {"n": 0}
+
+    def counting(prompt, schema, images):
+        calls["n"] += 1
+        name = schema.__name__
+        if name == "BaselineVerdict":
+            raise AssertionError("lean ran on a decided alert")
+        # The installer's fake is replaced below. Rebuild the same answers.
+        if name == "ExtractResult":
+            return _checkable("Health")
+        if name == "ContextVerdict":
+            return {"same_claim": True, "differing_detail": None}
+        if name == "StanceBatch":
+            return {"judgements": _stance(prompt)}
+        if name == "AtomicStanceBatch":
+            return {"judgements": []}
+        if name == "RepairBatch":
+            return {"judgements": []}
+        if name == "TopupBatch":
+            return {"queries": []}
+        if name == "_Draft":
+            return {
+                "atomic": [{
+                    "atomic_id": "A1",
+                    "explanation": "The page addresses the claim [E1].",
+                    "refute_kind": "entirely_false",
+                }],
+                "true_version": "The visit did not happen as described [E1].",
+                "correction_message": "The minister did not make that visit.",
+            }
+        raise AssertionError(name)
+
+    _install(monkeypatch, pages=_refute_pages(), extract=_checkable("Health"))
+    set_fake(counting)
+    out = _run(tmp_path, f"BREAKING send to 10 groups {CLAIM}", thread_id="open-alert")
+    assert out["status"] == "done"
+    card = out["result"]
+    assert card["verdict"] == "False"
+    assert card["decision"] == "alert"
+    assert card["provisional"] is True
+    assert card["alert_pending_approval"] is True
+    assert card["review_status"] == "pending"
+    assert card["needs_human"] is True
+    assert "High priority" in card["review_reason"] or "Medium priority" in card["review_reason"] or "Low priority" in card["review_reason"]
+    assert "verify before alerting" in card["review_reason"]
+    from misinfo_agent.review import apply_review, get_card, list_pending
+
+    queued = list_pending(tmp_path / "audit.db")
+    assert [row["thread_id"] for row in queued] == ["open-alert"]
+    assert queued[0]["review_reason"]
+    before = calls["n"]
+    updated = apply_review(
+        "open-alert",
+        "approve",
+        note="ok",
+        checkpoint_path=tmp_path / "checkpoints.db",
+        db_path=tmp_path / "audit.db",
+        additions_path=tmp_path / "memory_additions.parquet",
+    )
+    assert calls["n"] == before
+    assert updated["review_status"] == "approved"
+    assert updated["provisional"] is False
+    assert updated["alert_pending_approval"] is False
+    assert updated["verdict"] == "False"
+    assert list_pending(tmp_path / "audit.db") == []
+    stored = get_card(
+        "open-alert",
+        checkpoint_path=tmp_path / "checkpoints.db",
+        db_path=tmp_path / "audit.db",
+        additions_path=tmp_path / "memory_additions.parquet",
+    )
+    assert stored["review_status"] == "approved"
+    frame = __import__("pandas").read_parquet(tmp_path / "memory_additions.parquet")
+    assert list(frame["verdict"]) == ["False"]

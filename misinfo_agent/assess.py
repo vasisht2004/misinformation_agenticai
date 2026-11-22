@@ -186,6 +186,10 @@ def assess(state: dict) -> dict:
     )
     confidence = _confidence(state, verdict, core, _core_status(state))
     citations = _citations(explanations, true_version, what_we_found)
+    # Set on every Unverifiable, including a thin table. A conflict still
+    # has verdict None here; the non-blocking review turns that into
+    # Unverifiable and writes its own reason. Blocking mode keeps None.
+    reason = gate_box.unverifiable_reason(state) if verdict == "Unverifiable" else ""
     return _pack(
         verdict=verdict,
         confidence=confidence,
@@ -206,6 +210,7 @@ def assess(state: dict) -> dict:
         ],
         notes=notes,
         needs_human=needs_human,
+        unverifiable_reason=reason,
     )
 
 
@@ -734,6 +739,7 @@ def _from_archive(state: dict, notes: list[str]) -> dict:
         ],
         notes=notes,
         needs_human=needs_human,
+        unverifiable_reason=gate_box.unverifiable_reason(state) if label == "Unverifiable" else "",
     )
 
 
@@ -760,7 +766,12 @@ def _pack(
     notes: list,
     needs_human: bool,
     what_we_found: str = "",
+    unverifiable_reason: str = "",
 ) -> dict:
+    # Defaults for a run that never reaches review. Review overwrites
+    # these when the decision is alert or human and the pause does not
+    # stop the graph. needs_human stays the back-compat flag: pending
+    # means a person has not answered yet.
     return {
         "verdict": verdict,
         "confidence": confidence,
@@ -773,6 +784,12 @@ def _pack(
         "atomic_results": atomic_results,
         "assess_notes": notes,
         "needs_human": needs_human,
+        "provisional": False,
+        "review_status": "pending" if needs_human else "none",
+        "review_reason": "",
+        "alert_pending_approval": False,
+        "unverifiable_reason": unverifiable_reason,
+        "model_lean": None,
     }
 
 

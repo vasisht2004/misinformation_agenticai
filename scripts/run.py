@@ -37,7 +37,17 @@ def main(argv: list[str] | None = None) -> None:
     except LLMQuotaError as exc:
         print(f"stopped: {exc}")
         raise SystemExit(2) from exc
-    print(json.dumps(out.get("result") or {}, ensure_ascii=False, indent=2))
+        card = out.get("result") or {}
+        # A non-blocking run has already finished. The banner is the
+        # pause the terminal used to ask for. HUMAN_BLOCKING still uses
+        # the prompt above, because that path never reaches here until
+        # the person has answered.
+        if not config.HUMAN_BLOCKING and card.get("review_status") == "pending":
+            print("PROVISIONAL")
+            print(card.get("review_reason") or "Pending review.")
+            if card.get("alert_pending_approval"):
+                print("An alert is waiting for approval and has not been sent.")
+        print(json.dumps(card, ensure_ascii=False, indent=2))
     audit = out.get("audit") or {}
     if audit:
         print("AUDIT")

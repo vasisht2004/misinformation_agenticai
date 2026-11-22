@@ -70,6 +70,16 @@ def _card(state: dict) -> dict:
         "human_action": state.get("human_action") or "",
         "human_edited": bool(state.get("human_edited")),
         "note": state.get("note") or "",
+        # The UI reads the card, not the checkpoint. These are the review
+        # and the lean. model_lean is never copied into verdict.
+        "needs_human": bool(state.get("needs_human")),
+        "provisional": bool(state.get("provisional")),
+        "review_status": state.get("review_status") or "none",
+        "review_reason": state.get("review_reason") or "",
+        "alert_pending_approval": bool(state.get("alert_pending_approval")),
+        "unverifiable_reason": state.get("unverifiable_reason") or "",
+        "model_lean": state.get("model_lean"),
+        "core_detail_only_ids": list(state.get("core_detail_only_ids") or []),
         "queries": _queries(state),
         # Known here, one step before the audit row. The details section
         # is part of the card. It should still render if that write fails.

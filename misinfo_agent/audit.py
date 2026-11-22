@@ -50,6 +50,9 @@ _COLUMNS = (
     "prompt_versions",
     "errors",
     "search_capped",
+    # The lean is not the verdict. A reader who sorts on verdict must
+    # not see the model's guess in that column.
+    "model_lean",
 )
 
 
@@ -120,6 +123,7 @@ def _record(state: dict) -> dict:
         # Read from the state key the investigate node writes. The stats
         # copy is the fallback for a row recorded before that key existed.
         "search_capped": _search_capped(state),
+        "model_lean": state.get("model_lean"),
     }
 
 
@@ -200,9 +204,13 @@ def _insert(path: Path, record: dict) -> None:
         # column keeps INSERT OR REPLACE from failing on the old file.
         if "search_capped" not in columns:
             conn.execute("ALTER TABLE runs ADD COLUMN search_capped TEXT")
+        if "model_lean" not in columns:
+            conn.execute("ALTER TABLE runs ADD COLUMN model_lean TEXT")
         payload = dict(record)
         for key in ("evidence_ids", "models", "prompt_versions", "errors"):
             payload[key] = json.dumps(payload.get(key) or [], ensure_ascii=False)
+        lean = payload.get("model_lean")
+        payload["model_lean"] = json.dumps(lean, ensure_ascii=False) if isinstance(lean, dict) else ""
         conn.execute(
             f"INSERT OR REPLACE INTO runs ({', '.join(_COLUMNS)}) VALUES ({', '.join('?' for _ in _COLUMNS)})",
             [payload.get(column) for column in _COLUMNS],

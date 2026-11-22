@@ -207,3 +207,64 @@ def _out(decision: str, reasons: list[str], bar: float, rounds: int | None = Non
     if rounds is not None:
         result["rounds"] = rounds
     return result
+
+
+_LABELS = {"False", "Misleading", "True"}
+
+
+def open_review(state: dict) -> dict:
+    """How a non-blocking run shows a decision that still wants a person.
+
+    decide() has already chosen alert, human, search_more, or store, and
+    this does not change that string or p*. It only fills the card fields
+    the queue reads when HUMAN_BLOCKING is off and interrupt() is not called.
+    """
+    decision = state.get("decision") or ""
+    gate_name = state.get("gate") or ""
+    verdict = state.get("verdict")
+    if isinstance(verdict, str):
+        verdict = verdict.strip() or None
+    out = {
+        "review_reason": plain_review_reason(state),
+        "review_status": "pending",
+        "needs_human": True,
+        "alert_pending_approval": False,
+        "provisional": False,
+    }
+    if gate_name == "conflicting":
+        out["verdict"] = "Unverifiable"
+        out["unverifiable_reason"] = "conflicting_credible_sources"
+        return out
+    if gate_name == "error" or (decision != "alert" and state.get("errors")):
+        # A crashed node is routed here with no gate. The label is not a
+        # grade the evidence earned.
+        if gate_name == "error" or verdict not in _LABELS:
+            out["verdict"] = "Unverifiable"
+            out["unverifiable_reason"] = "error"
+            return out
+    if decision == "alert" and verdict in _LABELS:
+        out["provisional"] = True
+        out["alert_pending_approval"] = True
+        return out
+    if verdict in _LABELS:
+        out["provisional"] = True
+        return out
+    out["verdict"] = "Unverifiable"
+    if not state.get("unverifiable_reason"):
+        out["unverifiable_reason"] = "error" if state.get("errors") else (
+            state.get("unverifiable_reason") or "no_hits"
+        )
+    return out
+
+
+def plain_review_reason(state: dict) -> str:
+    """One sentence a person can read without the gate's group counts."""
+    priority = state.get("priority") if state.get("priority") in {"High", "Medium", "Low"} else "Medium"
+    verdict = state.get("verdict")
+    if state.get("decision") == "alert" and verdict in _LABELS:
+        return f"{priority} priority {verdict} verdict: verify before alerting"
+    if state.get("gate") == "conflicting":
+        return f"{priority} priority: sources disagree, verify before this is shared"
+    if state.get("gate") == "error" or state.get("errors"):
+        return f"{priority} priority: a check failed, verify before this is shared"
+    return f"{priority} priority: verify before this is shared"

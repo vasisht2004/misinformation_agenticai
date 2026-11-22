@@ -49,6 +49,22 @@ def test_high_priority_is_listed_first(tmp_path):
     _delete_pending(db, "high")
     _delete_pending(db, "not-a-run")
     assert [row["thread_id"] for row in list_pending(db)] == ["medium", "low"]
+    assert rows[0]["review_reason"] == "an alert waits for approval"
+    assert rows[0]["verdict"] == "False"
+
+
+def test_a_newer_low_ranks_above_an_older_medium(tmp_path):
+    # High is the only priority that jumps the queue. After that, newest.
+    db = tmp_path / "audit.db"
+    _write_pending(
+        db, "medium",
+        {"claim": "older", "why": "earlier", "priority": "Medium", "verdict": "False", "confidence": 0.5},
+    )
+    _write_pending(
+        db, "low",
+        {"claim": "newer", "why": "just now", "priority": "Low", "verdict": "Misleading", "confidence": 0.5},
+    )
+    assert [row["thread_id"] for row in list_pending(db)] == ["low", "medium"]
 
 
 def test_history_is_newest_first(tmp_path):

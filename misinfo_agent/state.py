@@ -246,7 +246,30 @@ class ClaimState(TypedDict, total=False):
     # Box 8+10. True when the verdict is withheld because the gate is
     # conflicting or error, or the archive row had no verdict. Box 12
     # already sends those gates to a person; this flag is for the card.
+    # Kept equal to (review_status == "pending") so an older reader that
+    # only knows this flag still sees a run that is waiting.
     needs_human: bool
+    # Shown before a person has verified it. A stored verdict is final
+    # and this is false. An alert that is waiting is true.
+    provisional: bool
+    # "none" once the run is stored. "pending" while a person still has
+    # to look. approve, edit, and reject write the other three.
+    review_status: str
+    # Plain words for the queue, including the priority: "High priority:
+    # verify before this is shared."
+    review_reason: str
+    # An alert exists and has not been sent. Approval clears it.
+    alert_pending_approval: bool
+    # Why the verdict is Unverifiable. Empty when the verdict is anything
+    # else. One of no_hits, only_tier34, single_credible, no_credible_record,
+    # conflicting_credible_sources, error.
+    unverifiable_reason: str
+    # The baseline lean when the rules abstained. None when the verdict
+    # was decided, or the claim was Other. Never a substitute for verdict.
+    model_lean: dict | None
+    # Evidence ids whose quote confirms a detail of the core claim and
+    # not the core claim itself. They do not vote for "supported".
+    core_detail_only_ids: list
 
     # Box 11. "High", "Medium" or "Low". This is the priority_level.
     # The score that produced it is priority_score. Style signals can

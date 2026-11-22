@@ -368,6 +368,64 @@ EXTRA_FACTCHECK_DOMAINS = [
 # is a PIB Fact Check post. A normal pib.gov.in press release stays.
 BLOCK_FACTCHECK_SITES = False
 
+# A support row counts for the core claim only when its quote carries the
+# core's own key terms: every number, amount, percent, and date the core
+# states, plus the main named entity and the action or status word. A page
+# that confirms a side detail (the fare, the crowd) was being counted as
+# support for the headline. Those rows become neutral for the core and are
+# listed in core_detail_only_ids. With this on, "supported" also needs two
+# independent tier 1-2 groups, not one credible group plus a blog.
+# False restores the older bar exactly: two groups, at least one tier 1-2.
+TRUE_NEEDS_CORE_MATCH = True
+
+# "strict" is the first matcher: the full name, and the exact action word,
+# on the quote alone. "relaxed" is the default because a news sentence
+# paraphrases ("Mamdani won", "Mamdani's win", "Mamdani defeated") and the
+# strict rule was dropping those. Numbers, amounts, percents, and dates
+# still have to match exactly. A drifted figure is a different claim.
+CORE_MATCH_MODE = "relaxed"
+
+# One line per action class. Written from general knowledge of how an
+# English news sentence paraphrases a verb. Not taken from the 50 eval
+# claims or their passages.
+ACTION_SYNONYMS = {
+    "win": ("win", "won", "wins", "winning", "victory", "victorious", "defeated", "beat", "elected"),
+    "ban": ("ban", "banned", "bans", "prohibit", "prohibited", "outlawed"),
+    "launch": ("launch", "launched", "unveil", "unveiled", "introduce", "introduced", "roll out", "rolled out"),
+    "die": ("die", "died", "dead", "death", "killed", "passed away"),
+    "arrest": ("arrest", "arrested", "detained", "held", "taken into custody"),
+    "announce": ("announce", "announced", "declare", "declared", "notified", "notification"),
+    "approve": ("approve", "approved", "approval", "sanction", "sanctioned"),
+    "inaugurate": ("inaugurate", "inaugurated", "inauguration"),
+    "resign": ("resign", "resigned", "resignation", "quit", "stepped down"),
+    "close": ("close", "closed", "closure", "shut", "shutdown"),
+    "open": ("open", "opened", "opening", "reopened"),
+    "issue": ("issue", "issued", "issuance"),
+    "order": ("order", "ordered", "directed", "directive"),
+    "deny": ("deny", "denied", "denial"),
+    "withdraw": ("withdraw", "withdrawn", "scrap", "scrapped", "revoke", "revoked"),
+    "invalid": ("invalid", "invalidated", "void"),
+    "attack": ("attack", "attacked", "assault", "assaulted"),
+    "show": ("show", "shows", "showed", "shown", "footage"),
+    "happen": ("happen", "happened", "occurred", "took place"),
+}
+
+# One tier-1 denial is enough to refute the core when no tier 1-2 group
+# supports it. Two newsrooms were required so a single blog could not
+# convict a claim; a ministry or a regulator is not a blog. The gate
+# reason names the host. False keeps the two-group refute rule.
+TIER1_SINGLE_REFUTE = True
+
+# True is the old pause: review() calls interrupt() and the process waits.
+# False lets the run finish. The verdict stays provisional, the pending
+# row stays in the queue, and a person approves it later without a re-run.
+HUMAN_BLOCKING = False
+
+# When the rules say Unverifiable, one baseline-style call records which
+# label the model would have picked. It is stored as model_lean. It does
+# not change the verdict, the confidence, the priority, or the decision.
+ASSISTED_LEAN = True
+
 # A passage has to be at least this close to the claim to be kept. 0.45 is
 # a floor to check against the live distribution, not a tuned threshold.
 PASSAGE_MIN_COS = 0.45

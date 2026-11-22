@@ -396,8 +396,13 @@ def _decide(state: dict) -> dict:
 
 
 def _output(state: dict) -> dict:
+    from misinfo_agent.lean import assisted_lean
     from misinfo_agent.output import render
-    return render(state)
+
+    # After review, so a conflict that became Unverifiable can lean.
+    # The lean is a field. render copies it and does not read it as the verdict.
+    extra = assisted_lean(state)
+    return {**extra, **render({**state, **extra})}
 
 
 def _audit(state: dict, db_path: Path, additions_path: Path) -> dict:

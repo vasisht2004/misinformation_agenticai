@@ -227,6 +227,13 @@
   ],
   "assess_notes": [],
   "needs_human": false,
+  "provisional": false,
+  "review_status": "none",
+  "review_reason": "",
+  "alert_pending_approval": false,
+  "unverifiable_reason": "",
+  "model_lean": null,
+  "core_detail_only_ids": [],
   "audit": {
     "run_id": "demo-rbi-500",
     "model": "gemini",

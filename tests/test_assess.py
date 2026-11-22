@@ -9,9 +9,19 @@ dissenter, fails here.
 
 import pytest
 
+import misinfo_agent.config as config
 from misinfo_agent.assess import assess
 from misinfo_agent.gate import gate
 from misinfo_agent.llm import LLMError, LLMQuotaError, clear_fake, set_fake
+
+
+@pytest.fixture(autouse=True)
+def _old_gate(monkeypatch):
+    # These rows were written for the older count. The new core-match
+    # and single-denial rules have their own tests. Assess is what this
+    # file locks, and it needs the table the draft was written against.
+    monkeypatch.setattr(config, "TRUE_NEEDS_CORE_MATCH", False)
+    monkeypatch.setattr(config, "TIER1_SINGLE_REFUTE", False)
 
 
 @pytest.fixture(autouse=True)

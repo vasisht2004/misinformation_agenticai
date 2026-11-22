@@ -198,8 +198,11 @@ def _run_checked(
         # pages this flag just asked us to read.
         state["route"] = "investigate"
 
-    # Default is to block fact-check sites. The flag is the opt-out.
-    config.BLOCK_FACTCHECK_SITES = not args.allow_factcheck
+    # Fact-check sites stay in the search. The blocked eval is the only
+    # caller that turns BLOCK_FACTCHECK_SITES on (scripts/run_eval.py).
+    # This script used to block them unless --allow-factcheck was passed,
+    # which made a manual check a different product from the graph.
+    config.BLOCK_FACTCHECK_SITES = False
     _search_until_gate(state)
     _finish(state)
 
@@ -542,7 +545,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-factcheck",
         action="store_true",
-        help="keep fact-check sites in the web search (blocked by default)",
+        help="accepted for old commands; fact-check sites stay in the search",
     )
     parser.add_argument(
         "--investigate",
