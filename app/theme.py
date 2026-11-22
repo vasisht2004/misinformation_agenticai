@@ -281,7 +281,39 @@ a {{
   color: #A7B0C2;
   margin: 0.4rem 0 0;
 }}
+.fl-caveat {{
+  color: #E8A33D;
+  margin: 0.55rem 0 0;
+  font-size: 1.02rem;
+}}
+.fl-strength {{ text-align: center; }}
+.fl-strength-label {{
+  color: #A7B0C2;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  margin-top: 0.1rem;
+}}
+.fl-search-banner {{
+  background: #3A3018;
+  color: #E3C27A;
+  border: 1px solid #E8A33D;
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  margin: 0 0 0.8rem;
+}}
 
+.fl-src-lean {{
+  border: 1px solid #F2F0EA;
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+  margin-top: 0.8rem;
+  color: #F2F0EA;
+  background: #0F1B36;
+}}
+.fl-src-lean strong {{
+  color: #F2F0EA;
+  font-weight: 600;
+}}
 .fl-lean {{
   border: 1px dashed #F2F0EA44;
   border-radius: 10px;
@@ -312,6 +344,14 @@ a {{
   padding: 0.9rem 1rem;
   margin: 0.7rem 0;
 }}
+.fl-related {{
+  background: #0F1B36;
+  border: 1px solid #1E2A45;
+  border-radius: 10px;
+  padding: 0.7rem 1rem;
+  margin: 0.7rem 0;
+}}
+.fl-related summary {{ cursor: pointer; color: #F2F0EA; }}
 .fl-muted {{ color: #A7B0C2; font-size: 0.92rem; }}
 .fl-explain {{
   font-size: 1.05rem;
@@ -398,6 +438,8 @@ a {{
   font-size: 0.88rem;
 }}
 .fl-chip.flag {{ border-color: #E05A47; color: #F2F0EA; }}
+.fl-chip.is-warn {{ border-color: #E8A33D; color: #E8A33D; }}
+.fl-chip.is-cap {{ border-color: #E05A47; color: #E05A47; }}
 .fl-quota {{ margin: 0.35rem 0 0.2rem; }}
 
 .fl-stepper {{ margin: 0.4rem 0 0.8rem; }}

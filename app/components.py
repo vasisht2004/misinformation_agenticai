@@ -164,6 +164,19 @@ def anchor(url, label) -> str:
     )
 
 
+# A search that did not read a page. "ran" and "not_needed" are quiet:
+# the first did the search, the second was never asked to.
+_SEARCH_BANNER = frozenset({
+    "cache_only_miss",
+    "monthly_cap",
+    "per_claim_cap",
+    "error",
+})
+_RING_VERDICTS = frozenset({"false", "misleading", "true"})
+# The assess template. It is a lie when the search never opened a page.
+_UNREAD = re.compile(r"no source(?: we read| that we read)? addressed", re.IGNORECASE)
+
+
 def plain_unverifiable(code) -> str:
     """The reason code in a sentence. Empty when the card has no code."""
     text = "" if code is None else str(code).strip()
@@ -176,6 +189,133 @@ def plain_unverifiable(code) -> str:
     if not words:
         return ""
     return words[:1].upper() + words[1:] + "."
+
+
+def _drop_unread(text: str, *, read: bool) -> str:
+    """Remove 'no source addressed this' when nothing was read.
+
+    The sentence is the template for an empty evidence table. On a
+    cache miss or a cap it describes a search that did not happen.
+    """
+    raw = "" if text is None else str(text).strip()
+    if read or not raw or not _UNREAD.search(raw):
+        return raw
+    parts = re.split(r"(?<=[.!?])\s+", raw)
+    kept = [part for part in parts if part and not _UNREAD.search(part)]
+    return " ".join(kept).strip()
+
+
+def sources_were_read(model: dict) -> bool:
+    """True when a page is on the card, or the search actually ran.
+
+    An empty table after a real search can still mean the pages we
+    opened did not address the claim. A cap or a cache miss cannot.
+    """
+    model = model or {}
+    if model.get("evidence"):
+        return True
+    return str(model.get("search_status") or "") == "ran"
+
+
+def search_banner_text(model: dict) -> str:
+    """Plain words for a search that did not finish. Empty when it did.
+
+    'Didn't run' is only honest when no live call and no cache hit
+    came back. A cap that stopped a later query says 'stopped'.
+    """
+    model = model or {}
+    status = str(model.get("search_status") or "")
+    if status not in _SEARCH_BANNER:
+        return ""
+    try:
+        live = int(model.get("searches_live") or 0)
+    except (TypeError, ValueError):
+        live = 0
+    try:
+        cached = int(model.get("searches_cached") or 0)
+    except (TypeError, ValueError):
+        cached = 0
+    quiet = live + cached <= 0
+    if status == "monthly_cap":
+        if quiet:
+            return (
+                "Search didn't run: the monthly search limit is reached. "
+                "This result is based on past fact-checks only."
+            )
+        return "Search stopped: the monthly search limit is reached."
+    if status == "per_claim_cap":
+        if quiet:
+            return (
+                "Search didn't run: this claim reached its search limit. "
+                "This result is based on past fact-checks only."
+            )
+        return "Search stopped: this claim reached its search limit."
+    if status == "cache_only_miss":
+        return (
+            "Search didn't run: this claim was not in the search cache. "
+            "This result is based on past fact-checks only."
+        )
+    if quiet:
+        return (
+            "Search didn't run: the search failed. "
+            "This result is based on past fact-checks only."
+        )
+    return "Search stopped: the search failed."
+
+
+def search_banner_html(model: dict) -> str:
+    text = search_banner_text(model)
+    if not text:
+        return ""
+    return f"<div class='fl-search-banner'>{esc(text)}</div>"
+
+
+def _states_a_correction(found: str) -> bool:
+    """what_we_found names what the sources said, not the abstain template."""
+    text = " ".join(str(found or "").split())
+    if not text:
+        return False
+    folded = text.casefold()
+    if _UNREAD.search(folded):
+        return False
+    if "not confirmed" in folded and "could not find two independent" in folded:
+        return False
+    return True
+
+
+def correction_text(model: dict) -> str:
+    """The shareable line the card shows.
+
+    An Unverifiable correction that says 'not confirmed' contradicts a
+    what_we_found that already states what the sources said. The card
+    quotes that finding instead of denying it.
+    """
+    model = model or {}
+    message = " ".join(str(model.get("correction_message") or "").split())
+    found = " ".join(str(model.get("what_we_found") or "").split())
+    verdict = str(model.get("verdict") or "").strip()
+    if (
+        verdict == "Unverifiable"
+        and "not confirmed" in message.casefold()
+        and _states_a_correction(found)
+    ):
+        return (
+            "Not enough credible sources to decide. "
+            f"What the sources we found say: {found}"
+        )
+    return message
+
+
+def correction_html(model: dict) -> str:
+    text = correction_text(model)
+    if not text:
+        return ""
+    return (
+        "<section class='fl-correction'>"
+        f"{eyebrow('Correction')}"
+        f"<p>{esc(text)}</p>"
+        "</section>"
+    )
 
 
 def load_fixture(name: str) -> dict:
@@ -326,17 +466,34 @@ def view_model(state: dict | None = None, result: dict | None = None) -> dict:
 
     reason_code = _pick(result, state, "unverifiable_reason", "") or ""
     verdict = _pick(result, state, "verdict", None)
+    status = _pick(result, state, "search_status", "") or ""
+    explanation = _pick(result, state, "explanation", "") or ""
+    found = _pick(result, state, "what_we_found", "") or ""
+    # Scrub before the dict is built. Both the static card and the page
+    # read this model, so the unread sentence has to be gone here.
+    read = sources_were_read({"evidence": evidence, "search_status": status})
+    explanation = _drop_unread(explanation, read=read)
+    found = _drop_unread(found, read=read)
+    caveats = _pick(result, state, "caveats", []) or []
+    if isinstance(caveats, str):
+        caveats = [caveats]
+    if not isinstance(caveats, (list, tuple)):
+        caveats = []
     return {
         "claim": _pick(result, state, "claim", "") or "",
         "verdict": verdict,
         "confidence": _pick(result, state, "confidence", None),
         "priority": _pick(result, state, "priority", "") or "",
-        "explanation": _pick(result, state, "explanation", "") or "",
+        "explanation": explanation,
         "evidence": evidence,
         "red_flags": [str(flag) for flag in flags if str(flag or "").strip()],
         "true_version": _pick(result, state, "true_version", "") or "",
         "correction_message": _pick(result, state, "correction_message", "") or "",
-        "what_we_found": _pick(result, state, "what_we_found", "") or "",
+        "what_we_found": found,
+        "caveats": [str(item).strip() for item in caveats if str(item or "").strip()],
+        "search_status": "" if status is None else str(status),
+        "searches_live": _pick(result, state, "searches_live", 0) or 0,
+        "searches_cached": _pick(result, state, "searches_cached", 0) or 0,
         "provisional": bool(_pick(result, state, "provisional", False)),
         "review_status": _pick(result, state, "review_status", "") or "",
         "review_reason": _pick(result, state, "review_reason", "") or _pick(result, state, "why", "") or "",
@@ -449,11 +606,30 @@ def marquee_html(domains=None) -> str:
 
 
 def quota_html(model_used: int, model_cap: int, search_used: int, search_cap: int) -> str:
-    """The live counters. Caps come from config, not from STATS."""
+    """The live counters. Caps come from config, not from STATS.
+
+    The search chip turns amber at 90% of the cap and red when the cap
+    is reached. The tooltip is the practical consequence: a new claim
+    cannot open a search, and a cached claim still can.
+    """
+    try:
+        used = int(search_used)
+        cap = int(search_cap)
+    except (TypeError, ValueError):
+        used, cap = 0, 0
+    klass = ""
+    title = ""
+    if cap > 0 and used >= cap:
+        klass = " is-cap"
+        title = "new claims can't search; cached claims still work"
+    elif cap > 0 and used / cap >= 0.9:
+        klass = " is-warn"
+        title = "new claims can't search; cached claims still work"
+    tip = f" title=\"{esc(title)}\"" if title else ""
     return (
         "<div class='fl-quota'>"
         f"<span class='fl-chip'>Model {int(model_used)}/{int(model_cap)} today</span>"
-        f"<span class='fl-chip'>Search {int(search_used)}/{int(search_cap)} month</span>"
+        f"<span class='fl-chip{klass}'{tip}>Search {used}/{cap} month</span>"
         "</div>"
     )
 
@@ -465,8 +641,13 @@ def _clock(seconds) -> str:
         number = float(seconds)
     except (TypeError, ValueError):
         return ""
-    if number != number:
+    if number != number or number < 0:
         return ""
+    # Under a twentieth of a second the one-decimal clock rounds to 0.0s,
+    # which reads as a measurement of zero. A dash says the step finished
+    # too fast to show.
+    if number < 0.05:
+        return "—"
     if number < 10:
         return f"{number:.1f}s"
     return f"{round(number)}s"
@@ -600,7 +781,7 @@ def _confidence_float(value) -> float | None:
 
 
 def _ring(confidence, color: str) -> str:
-    """SVG ring. The dash is the confidence. An unknown score is an empty ring."""
+    """SVG ring. The dash is evidence strength, not the model's own score."""
     radius = 36
     circ = 2 * 3.14159265 * radius
     number = _confidence_float(confidence)
@@ -613,7 +794,7 @@ def _ring(confidence, color: str) -> str:
     gap = circ - dash
     return (
         "<svg class='fl-ring' width='96' height='96' viewBox='0 0 96 96' role='img' "
-        f"aria-label='{esc('Confidence ' + label)}'>"
+        f"aria-label='{esc('evidence strength ' + label)}'>"
         "<circle cx='48' cy='48' r='36' fill='none' stroke='#1E2A45' stroke-width='8'/>"
         f"<circle cx='48' cy='48' r='36' fill='none' stroke='{esc(color)}' stroke-width='8' "
         f"stroke-linecap='round' stroke-dasharray='{dash:.2f} {gap:.2f}' "
@@ -661,18 +842,120 @@ def verdict_html(model: dict, *, compact: bool = False) -> str:
     claim = str(model.get("claim", "") or "").strip()
     claim_html = f"<p class='fl-claim'>{esc(claim)}</p>" if claim else ""
     plain = str(model.get("unverifiable_plain", "") or "").strip()
-    plain_html = f"<p class='fl-plain-reason'>{esc(plain)}</p>" if plain else ""
+    # The ring is evidence strength, and only for a verdict the evidence
+    # rule actually chose. Unverifiable has no strength to draw; the
+    # reason sentence stands where the ring would have been.
+    ring = ""
+    under = ""
+    if kind == "unverifiable":
+        if plain:
+            under = f"<p class='fl-plain-reason'>{esc(plain)}</p>"
+    elif not compact and kind in _RING_VERDICTS:
+        ring = (
+            "<div class='fl-strength'>"
+            f"{_ring(model.get('confidence', None), color)}"
+            "<div class='fl-strength-label'>evidence strength</div>"
+            "</div>"
+        )
+    caveat_html = _caveat_html(model.get("caveats"))
+    below = ""
+    if kind != "unverifiable" and plain:
+        below = f"<p class='fl-plain-reason'>{esc(plain)}</p>"
     size = "font-size: 2.6rem;" if compact else ""
-    ring = "" if compact else _ring(model.get("confidence", None), color)
     bits.append(
         "<div class='fl-verdict-row'>"
         f"<div><h2 class='fl-verdict-word' style='color: {esc(color)}; {size}'>{esc(label)}</h2>"
-        f"{chip}</div>"
+        f"{chip}{caveat_html}{under}</div>"
         f"{ring}"
         "</div>"
-        f"{claim_html}{plain_html}"
+        f"{claim_html}{below}"
     )
     return "".join(bits)
+
+
+def _caveat_html(caveats) -> str:
+    """Amber, directly under the verdict word. Empty when the card has none."""
+    if isinstance(caveats, str):
+        caveats = [caveats]
+    bits = []
+    for item in caveats or []:
+        text = str(item or "").strip()
+        if text:
+            bits.append(f"<p class='fl-caveat'>{esc(text)}</p>")
+    return "".join(bits)
+
+
+def evidence_lean_html(model: dict) -> str:
+    """What the card's own evidence rows lean, with no model in it.
+
+    Only an Unverifiable card. A decided verdict already is the lean.
+    A group that argues both sides counts on neither, the same way the
+    gate refuses to let it vote. The border is solid so it reads as
+    stronger than the dashed model guess underneath.
+    """
+    model = model or {}
+    if str(model.get("verdict") or "").strip() != "Unverifiable":
+        return ""
+    groups: dict[str, dict] = {}
+    for row in model.get("evidence") or []:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("group_id") or row.get("netloc") or "ungrouped")
+        slot = groups.setdefault(key, {"stances": set(), "tiers": []})
+        stance = str(row.get("stance") or "").strip().lower()
+        if stance:
+            slot["stances"].add(stance)
+        try:
+            tier = int(row.get("tier"))
+        except (TypeError, ValueError):
+            tier = None
+        if tier is not None:
+            slot["tiers"].append(tier)
+    refute = 0
+    support = 0
+    tiers: list[int] = []
+    for slot in groups.values():
+        stances = slot["stances"]
+        # Both sides in one group is not a vote. Counting it twice would
+        # invent a lean the gate refused to take.
+        if "refutes" in stances and "supports" in stances:
+            continue
+        if "refutes" in stances:
+            refute += 1
+            tiers.extend(slot["tiers"])
+        elif "supports" in stances:
+            support += 1
+            tiers.extend(slot["tiers"])
+    if refute == 0 and support == 0:
+        return ""
+    if refute > support:
+        word = "FALSE"
+    elif support > refute:
+        word = "TRUE"
+    else:
+        word = "SPLIT"
+    note = _tier_span(tiers)
+    if refute == 1:
+        refute_bit = "1 independent group refutes"
+    else:
+        refute_bit = f"{refute} independent groups refute"
+    line = f"Sources lean {word}: {refute_bit}, {support} support ({note})"
+    if word == "SPLIT":
+        line = f"Sources are split: {refute_bit}, {support} support ({note})"
+    return (
+        "<aside class='fl-src-lean'>"
+        f"<strong>{esc(line)}</strong>"
+        "</aside>"
+    )
+
+
+def _tier_span(tiers: list[int]) -> str:
+    if not tiers:
+        return "tier unknown"
+    lo, hi = min(tiers), max(tiers)
+    if lo == hi:
+        return f"all tier {lo}"
+    return f"all tier {lo}-{hi}"
 
 
 def lean_html(model: dict) -> str:
@@ -699,34 +982,39 @@ def lean_html(model: dict) -> str:
     )
 
 
-def _seen_heading(match_type: str) -> str:
-    """Exact is this claim again. Similar is a different claim that shares wording."""
-    if str(match_type or "").strip().lower() == "similar":
-        return "Related past fact-check"
-    return "Seen before"
+def _score_text(score) -> str:
+    if score is None or score == "":
+        return ""
+    try:
+        return f" · match score {float(score):.2f}"
+    except (TypeError, ValueError):
+        return ""
 
 
 def seen_html(model: dict) -> str:
+    """Exact is 'Seen before'. Similar is a collapsed related list. None is nothing.
+
+    A score under 0.70 is match_type none. Showing it as 'Seen before'
+    told a reader this claim had already been checked. The 0.68 youturn
+    hit on the states claim was that mistake.
+    """
     model = model or {}
+    kind = str(model.get("match_type") or "").strip().lower()
+    if kind == "exact":
+        return _seen_block(model, collapsed=False)
+    if kind == "similar":
+        return _seen_block(model, collapsed=True)
+    return ""
+
+
+def _seen_block(model: dict, *, collapsed: bool) -> str:
     site = str(model.get("seen_site", "") or "").strip()
     link = str(model.get("seen_link", "") or "").strip()
     claim = str(model.get("seen_claim", "") or "").strip()
     if not (site or link or claim):
         return ""
     when = str(model.get("seen_date", "") or "").strip() or "date unknown"
-    score = model.get("seen_score", None)
-    score_text = ""
-    if score is not None and score != "":
-        try:
-            score_text = f" · match score {float(score):.2f}"
-        except (TypeError, ValueError):
-            score_text = ""
-    heading = _seen_heading(model.get("match_type", ""))
-    # C1 is the archive hit. The citation chip scrolls here, because
-    # there is no evidence card for a reused fact-check.
-    section_id = ""
-    if str(model.get("match_type") or "").lower() == "exact":
-        section_id = " id='ev-C1'"
+    score_text = _score_text(model.get("seen_score", None))
     link_html = ""
     if safe_href(link):
         link_html = f"<div>{anchor(link, 'Read the fact-check')}</div>"
@@ -742,12 +1030,25 @@ def seen_html(model: dict) -> str:
     extra_html = ""
     if extras:
         extra_html = "<p class='fl-muted'>Also debunked by " + " · ".join(extras) + "</p>"
-    return (
-        f"<section class='fl-seen'{section_id}>"
-        f"<div class='fl-eyebrow'>— {esc(heading)}</div>"
+    body = (
         f"<div><strong>{esc(site or 'Fact-check')}</strong>"
         f" <span class='fl-muted'>{esc(when)}{esc(score_text)}</span></div>"
         f"{claim_html}{link_html}{extra_html}"
+    )
+    if collapsed:
+        # Closed by default. The score is in the summary so a reader sees
+        # how close the other claim was without opening it.
+        summary = "Related past fact-checks" + score_text
+        return (
+            "<details class='fl-related'>"
+            f"<summary>{esc(summary)}</summary>"
+            f"{body}"
+            "</details>"
+        )
+    return (
+        "<section class='fl-seen' id='ev-C1'>"
+        "<div class='fl-eyebrow'>— Seen before</div>"
+        f"{body}"
         "</section>"
     )
 
@@ -956,19 +1257,20 @@ def stance_tier_rows(rows) -> list[dict]:
 
 
 def card_html(model: dict, *, cite_href=None, highlight: str = "") -> str:
-    """The static card: hero, lean, seen-before, explanation, evidence, flags.
+    """The static card: banner, verdict, leans, seen-before, evidence, correction.
 
-    Correction and the charts are Streamlit widgets, so they stay in the
-    page. Everything that is a string from the claim is in this HTML.
+    Charts stay in the page. Everything that is a string from the claim
+    is in this HTML, including the correction the card is willing to show.
     """
     model = model or {}
     ids = [row.get("id") for row in model.get("evidence") or [] if isinstance(row, dict) and row.get("id")]
-    # C1 is the archive fact-check, not a web row. The chip is only
-    # offered when this card actually has that hit to open.
-    if model.get("seen_link") or model.get("match_type") == "exact":
+    # C1 is the reused fact-check. A similar or none hit is not that chip.
+    if str(model.get("match_type") or "").lower() == "exact":
         ids.append("C1")
     return "".join((
+        search_banner_html(model),
         verdict_html(model),
+        evidence_lean_html(model),
         lean_html(model),
         seen_html(model),
         explanation_html(model.get("explanation", ""), ids, cite_href),
@@ -978,6 +1280,7 @@ def card_html(model: dict, *, cite_href=None, highlight: str = "") -> str:
             core_detail_only_ids=model.get("core_detail_only_ids") or [],
         ),
         flags_html(model.get("red_flags") or []),
+        correction_html(model),
     ))
 
 

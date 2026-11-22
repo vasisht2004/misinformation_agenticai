@@ -145,6 +145,9 @@
     "quote_unverified": 0
   },
   "search_capped": null,
+  "search_status": "ran",
+  "searches_live": 5,
+  "searches_cached": 0,
   "evidence": [
     {
       "id": "E1",

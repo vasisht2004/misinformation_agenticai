@@ -10,8 +10,22 @@ from __future__ import annotations
 
 
 def render(state: dict) -> dict:
-    """Build state['result']. Do not re-decide the verdict."""
-    return {"result": _card(state)}
+    """Build state['result']. Do not re-decide the verdict.
+
+    The search status is written here as well as on the card. The output
+    node is the one that always runs, including when the search was not
+    asked (a reused prior, or Other). Investigate has already copied the
+    same rollup onto its own return when a search round happened.
+    """
+    from misinfo_agent.search import resolve_search_status
+
+    report = resolve_search_status(state)
+    return {
+        "search_status": report["search_status"],
+        "searches_live": report["searches_live"],
+        "searches_cached": report["searches_cached"],
+        "result": _card(state, report),
+    }
 
 
 def past_factcheck_heading(match_type: str) -> str:
@@ -27,7 +41,7 @@ def past_factcheck_heading(match_type: str) -> str:
     return "Seen before"
 
 
-def _card(state: dict) -> dict:
+def _card(state: dict, report: dict | None = None) -> dict:
     explanations, parts = _parts(state)
     best = state.get("best_match") if isinstance(state.get("best_match"), dict) else {}
     seen = None
@@ -98,6 +112,12 @@ def _card(state: dict) -> dict:
         "alert_pending_approval": bool(state.get("alert_pending_approval")),
         "unverifiable_reason": state.get("unverifiable_reason") or "",
         "model_lean": state.get("model_lean"),
+        # The page reads the card. A caveat that stays only on the state
+        # never reaches the amber line under the verdict.
+        "caveats": _caveats(state),
+        "search_status": (report or {}).get("search_status") or "",
+        "searches_live": (report or {}).get("searches_live") or 0,
+        "searches_cached": (report or {}).get("searches_cached") or 0,
         "core_detail_only_ids": list(state.get("core_detail_only_ids") or []),
         "queries": _queries(state),
         # Known here, one step before the audit row. The details section
@@ -190,6 +210,21 @@ def _evidence(state: dict) -> list[dict]:
             "atomic_id": str(row.get("atomic_id") or "A1"),
         })
     return rows
+
+
+def _caveats(state: dict) -> list[str]:
+    """The strings the card already carries. Empty stays empty."""
+    raw = state.get("caveats")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    found = []
+    for item in raw:
+        text = " ".join(str(item or "").split())
+        if text:
+            found.append(text)
+    return found
 
 
 def _tier(value):

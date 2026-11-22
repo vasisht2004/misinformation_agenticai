@@ -752,6 +752,8 @@ def test_cached_and_fake_calls_do_not_count(monkeypatch, tmp_path):
         "cached",
         "success",
         "cache_miss",
+        # Set where the call returns or raises. The card rolls these up.
+        "status",
     }
     reset_search_usage()
     assert get_search_usage() == []
