@@ -161,19 +161,29 @@ def search(
         hits, from_cache, cache_miss = _run(
             query, purpose, max_results, include, exclude, search_depth, end_date
         )
-    except SearchError:
-        _record(purpose, query, 0, started, cached=False, success=False)
+    except SearchError as exc:
+        # The status is recorded here, at the raise, so a later box does
+        # not have to guess whether the empty list was a cap or a miss.
+        _record(
+            purpose, query, 0, started, cached=False, success=False,
+            status=failure_status(exc),
+        )
         raise
     except Exception as exc:
         # A bug or a library error can quote the request, and the request
         # can quote the key. Wrap it before it reaches the audit.
-        _record(purpose, query, 0, started, cached=False, success=False)
+        _record(
+            purpose, query, 0, started, cached=False, success=False, status="error"
+        )
         raise SearchError(purpose, _safe(exc, None, query)) from None
     if cache_miss:
         # An empty list, not a cached empty search. Writing it would make
-        # the next run think Tavily returned nothing.
+        # the next run think Tavily returned nothing. cache_only_miss is
+        # the card status: nothing was read, so the card must not say a
+        # source addressed the claim.
         _record(
-            purpose, query, 0, started, cached=False, success=True, cache_miss=True
+            purpose, query, 0, started, cached=False, success=True,
+            cache_miss=True, status="cache_only_miss",
         )
         return []
     # Belt and braces. The exclude list is already on the request; a hit
@@ -189,6 +199,7 @@ def search(
         started,
         cached=from_cache,
         success=True,
+        status="ran",
     )
     return kept
 
@@ -824,7 +835,158 @@ def _write_cache(query, max_results, include, exclude, search_depth, end_date, h
     temporary.replace(path)
 
 
-def _record(purpose, query, n_results, started, *, cached, success, cache_miss=False) -> None:
+# One label for the whole claim. A single query can be "ran" while a
+# later query hits a cap; the rollup below keeps the cap, because that is
+# what the card has to explain.
+_SEARCH_STATUSES = frozenset({
+    "ran",
+    "cache_only_miss",
+    "monthly_cap",
+    "per_claim_cap",
+    "error",
+    "not_needed",
+})
+
+
+def failure_status(exc: BaseException) -> str:
+    """The card status for a search that raised.
+
+    A provider quota has cap None: Tavily reported the bill, which is the
+    same monthly limit this process enforces itself. A per-claim stop is
+    the only other cap. Anything else is a failed call, not a limit.
+    """
+    if isinstance(exc, SearchQuotaError):
+        if getattr(exc, "cap", None) == "per_claim":
+            return "per_claim_cap"
+        return "monthly_cap"
+    return "error"
+
+
+def claim_search_status(rows, *, needed: bool = True) -> dict:
+    """Roll one claim's usage rows into the status the card shows.
+
+    A cap outranks a query that already returned: the card has to say the
+    limit, not only that some page arrived. A cache-only miss is the status
+    only when nothing came back from the cache or from Tavily. not_needed
+    is for a claim that never asked, and only when this slice is empty of
+    real outcomes.
+    """
+    live = 0
+    cached_n = 0
+    saw: list[str] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "")
+        saw.append(status)
+        if row.get("cached"):
+            cached_n += 1
+        elif status == "ran":
+            live += 1
+    if "monthly_cap" in saw:
+        status = "monthly_cap"
+    elif "per_claim_cap" in saw:
+        status = "per_claim_cap"
+    elif "error" in saw and "ran" not in saw:
+        status = "error"
+    elif "cache_only_miss" in saw and "ran" not in saw:
+        status = "cache_only_miss"
+    elif "ran" in saw:
+        status = "ran"
+    elif not needed:
+        status = "not_needed"
+    else:
+        # No row. Queries skipped because they already ran, or a round
+        # that had nothing new to ask. That is not a miss and not a cap.
+        status = "ran"
+    return {
+        "search_status": status,
+        "searches_live": live,
+        "searches_cached": cached_n,
+    }
+
+
+def search_not_needed(state: dict | None) -> bool:
+    """True when this claim was never going to call Tavily.
+
+    reuse_prior copies the archive. Other is not a checkable claim. Both
+    are not_needed, which the card treats as a finished step rather than
+    a search that failed.
+    """
+    if not isinstance(state, dict):
+        return False
+    if state.get("checkable") is False:
+        return True
+    if state.get("route") == "reuse_prior":
+        return True
+    if state.get("verdict") == "Other":
+        return True
+    return False
+
+
+def _stored_counts(state: dict, stats: dict) -> tuple[int, int]:
+    def one(value) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    live = state.get("searches_live", None)
+    cached_n = state.get("searches_cached", None)
+    if live is None:
+        live = stats.get("searches_live", 0)
+    if cached_n is None:
+        cached_n = stats.get("searches_cached", 0)
+    return one(live), one(cached_n)
+
+
+def resolve_search_status(state: dict | None) -> dict:
+    """The claim's status. Usage rows win; a saved card is the fallback.
+
+    output() runs after the searches, in the same process, so the usage
+    log still has this run. A fixture has no log. It keeps the status that
+    was stored with the card, and a reused prior with no log is not_needed.
+    """
+    state = state if isinstance(state, dict) else {}
+    needed = not search_not_needed(state)
+    marks = state.get("run_marks") if isinstance(state.get("run_marks"), dict) else {}
+    try:
+        start = int(marks.get("searches") or 0)
+    except (TypeError, ValueError):
+        start = 0
+    if start < 0:
+        start = 0
+    rows = get_search_usage()[start:]
+    if rows:
+        return claim_search_status(rows, needed=needed)
+    stats = state.get("investigate_stats") if isinstance(state.get("investigate_stats"), dict) else {}
+    existing = state.get("search_status")
+    if existing not in _SEARCH_STATUSES:
+        existing = stats.get("search_status")
+    if existing in _SEARCH_STATUSES:
+        live, cached_n = _stored_counts(state, stats)
+        return {
+            "search_status": existing,
+            "searches_live": live,
+            "searches_cached": cached_n,
+        }
+    if not needed:
+        return {"search_status": "not_needed", "searches_live": 0, "searches_cached": 0}
+    capped = state.get("search_capped") or stats.get("search_capped")
+    if capped == "monthly":
+        return {"search_status": "monthly_cap", "searches_live": 0, "searches_cached": 0}
+    if capped == "per_claim":
+        return {"search_status": "per_claim_cap", "searches_live": 0, "searches_cached": 0}
+    if stats or state.get("evidence"):
+        try:
+            live = max(0, int(stats.get("searches") or 0))
+        except (TypeError, ValueError):
+            live = 0
+        return {"search_status": "ran", "searches_live": live, "searches_cached": 0}
+    return {"search_status": "not_needed", "searches_live": 0, "searches_cached": 0}
+
+
+def _record(purpose, query, n_results, started, *, cached, success, cache_miss=False, status="ran") -> None:
     row = {
         "purpose": purpose,
         "query": query,
@@ -834,6 +996,9 @@ def _record(purpose, query, n_results, started, *, cached, success, cache_miss=F
         "success": success,
         # A cache-only miss. cached stays false: nothing was stored.
         "cache_miss": bool(cache_miss),
+        # ran, cache_only_miss, monthly_cap, per_claim_cap, or error.
+        # Set at the return or the raise, not inferred later.
+        "status": status if status in _SEARCH_STATUSES else "error",
     }
     with _USAGE_LOCK:
         _USAGE.append(row)

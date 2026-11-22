@@ -536,13 +536,22 @@ def _filter_rows(rows, stances, tiers, highlight: str) -> list[dict]:
 
 def _render_card(model: dict, *, fixture: str, highlight: str) -> None:
     ids = [row.get("id") for row in model.get("evidence") or [] if isinstance(row, dict) and row.get("id")]
-    if model.get("seen_link") or model.get("match_type") == "exact":
+    # C1 is the reused fact-check. A similar or none hit is not that chip.
+    if str(model.get("match_type") or "").lower() == "exact":
         ids.append("C1")
 
     def href_for(ident: str) -> str:
         return _cite_href(fixture, ident)
 
+    banner = components.search_banner_html(model)
+    if banner:
+        st.markdown(banner, unsafe_allow_html=True)
     st.markdown(components.verdict_html(model), unsafe_allow_html=True)
+    # The evidence lean is computed from the rows. It sits above the
+    # model lean, which stays the dashed, weaker guess.
+    source_lean = components.evidence_lean_html(model)
+    if source_lean:
+        st.markdown(source_lean, unsafe_allow_html=True)
     lean = components.lean_html(model)
     if lean:
         st.markdown(lean, unsafe_allow_html=True)
@@ -618,7 +627,7 @@ def _render_card(model: dict, *, fixture: str, highlight: str) -> None:
     elif found:
         st.markdown(components.eyebrow("What we found"), unsafe_allow_html=True)
         st.markdown(f"<p>{components.esc(found)}</p>", unsafe_allow_html=True)
-    correction = str(model.get("correction_message") or "").strip()
+    correction = components.correction_text(model)
     if correction:
         st.markdown(components.eyebrow("Correction"), unsafe_allow_html=True)
         if model.get("provisional"):

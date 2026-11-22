@@ -188,6 +188,17 @@ class ClaimState(TypedDict, total=False):
     # stopped a later query. Pages from the queries that finished stay.
     # None is not stored: a clean run leaves the key missing.
     search_capped: str | None
+    # Box 7. What the card says about the web search for this claim.
+    # "ran" is a live call or a cache hit. "cache_only_miss",
+    # "monthly_cap", "per_claim_cap" and "error" are set where search.py
+    # raises or returns a cache-only miss. "not_needed" is a reused prior
+    # or Other: the search was not asked. The card must not describe a
+    # miss as a source that said nothing.
+    search_status: str
+    # Box 7. Provider calls that returned, and cache hits. A cache-only
+    # miss is neither: it did not spend a credit and it did not read a page.
+    searches_live: int
+    searches_cached: int
     # Box 9. How many investigate rounds have already finished. The gate
     # and box 12 stop at config.MAX_SEARCH_ROUNDS. A search_more return
     # is the only write that advances this.

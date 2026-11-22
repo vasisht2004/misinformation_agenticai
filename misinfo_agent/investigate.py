@@ -44,6 +44,7 @@ from misinfo_agent.search import (
     SearchError,
     SearchQuotaError,
     factcheck_blocked,
+    claim_search_status,
     get_search_usage,
     looks_like_factcheck,
     registrable_domain,
@@ -367,23 +368,50 @@ def investigate(state: dict) -> dict:
     fact-check hits, in their own fetch slots, with the phrase rule off.
     It can add a row. It does not drop a row the news search kept.
     """
+    # The status is this call's usage, including a fact-check budget.
+    # search.py already labelled each raise and each cache-only miss.
+    mark = len(get_search_usage())
     if _eval_sites(state) != "allowed":
-        return _investigate_once(state)
-    saved = config.BLOCK_FACTCHECK_SITES
-    try:
-        # On for this half only. An open search of the same words is a
-        # different result list, and the fact-check URLs in it take the
-        # twenty-five hit slots and the twelve fetches. That is why the
-        # allowed run abstained on claims the blocked run had decided.
-        config.BLOCK_FACTCHECK_SITES = True
-        blocked = _investigate_once(state)
-    finally:
-        config.BLOCK_FACTCHECK_SITES = saved
-    # A gate round already has the fact-check rows from the first call.
-    # Running the budget again would search the same plan twice.
-    if _prior_queries(state):
-        return blocked
-    return _append_factchecks(state, blocked)
+        result = _investigate_once(state)
+    else:
+        saved = config.BLOCK_FACTCHECK_SITES
+        try:
+            # On for this half only. An open search of the same words is a
+            # different result list, and the fact-check URLs in it take the
+            # twenty-five hit slots and the twelve fetches. That is why the
+            # allowed run abstained on claims the blocked run had decided.
+            config.BLOCK_FACTCHECK_SITES = True
+            blocked = _investigate_once(state)
+        finally:
+            config.BLOCK_FACTCHECK_SITES = saved
+        # A gate round already has the fact-check rows from the first call.
+        # Running the budget again would search the same plan twice.
+        if _prior_queries(state):
+            result = blocked
+        else:
+            result = _append_factchecks(state, blocked)
+    return _attach_search_status(result, get_search_usage()[mark:])
+
+
+def _attach_search_status(result: dict, rows: list) -> dict:
+    """Copy the rolled-up search status onto the round the gate reads.
+
+    The rows already carry the status search.py set when it raised or
+    when a cache-only miss returned nothing. This does not re-decide it.
+    """
+    report = claim_search_status(rows, needed=True)
+    out = dict(result)
+    out["search_status"] = report["search_status"]
+    out["searches_live"] = report["searches_live"]
+    out["searches_cached"] = report["searches_cached"]
+    stats = out.get("investigate_stats")
+    if isinstance(stats, dict):
+        stats = dict(stats)
+        stats["search_status"] = report["search_status"]
+        stats["searches_live"] = report["searches_live"]
+        stats["searches_cached"] = report["searches_cached"]
+        out["investigate_stats"] = stats
+    return out
 
 
 def _investigate_once(state: dict) -> dict:
