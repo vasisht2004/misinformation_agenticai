@@ -1,0 +1,93 @@
+{
+  "claim": "RBI has cancelled every ₹500 note already in circulation.",
+  "verdict": "Misleading",
+  "confidence": 0.74,
+  "priority": "Medium",
+  "provisional": false,
+  "review_status": "",
+  "review_reason": "",
+  "alert_pending_approval": false,
+  "route": "investigate",
+  "match_type": "similar",
+  "decision": "store",
+  "gate": "sufficient",
+  "best_match": {
+    "article_id": "fc-rbi-500-2016",
+    "site": "Alt News",
+    "date": "2016-11-15",
+    "primary_claim": "RBI will discontinue ₹500 notes printed before 2016 from December.",
+    "true_version": "RBI had announced no such deadline for ₹500 notes.",
+    "verdict": "False",
+    "url": "https://www.altnews.in/example-rbi-500-notes-invalid",
+    "domain": "Finance & scams",
+    "dense_cos": 0.91,
+    "also_debunked_by": [
+      {
+        "site": "BOOM",
+        "url": "https://www.boomlive.in/example-rbi-500-notes"
+      }
+    ]
+  },
+  "red_flags": [
+    "Sensational style"
+  ],
+  "explanation": "The Reserve Bank has not cancelled every ₹500 note in circulation [E1]. A newsroom repeats that there is no such order [E3]. One page does confirm that ₹500 notes are still being issued [E2].",
+  "true_version": "₹500 notes in circulation remain legal tender. RBI has not cancelled the series.",
+  "correction_message": "₹500 notes have not been cancelled. They remain legal tender.",
+  "citations": [
+    "E1",
+    "E2",
+    "E3"
+  ],
+  "core_detail_only_ids": [
+    "E2"
+  ],
+  "evidence": [
+    {
+      "id": "E1",
+      "url": "https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=12345",
+      "netloc": "rbi.org.in",
+      "tier": 1,
+      "stance": "refutes",
+      "quote": "No order has been issued cancelling every ₹500 note in circulation.",
+      "passage": "No order has been issued cancelling every ₹500 note in circulation.",
+      "group_id": "rbi.org.in",
+      "date": "2024-11-20"
+    },
+    {
+      "id": "E2",
+      "url": "https://www.thehindu.com/business/example-rbi-still-prints-500",
+      "netloc": "thehindu.com",
+      "tier": 2,
+      "stance": "supports",
+      "quote": "The Reserve Bank continues to issue ₹500 denomination notes.",
+      "passage": "The Reserve Bank continues to issue ₹500 denomination notes.",
+      "group_id": "thehindu.com",
+      "date": "2024-10-02"
+    },
+    {
+      "id": "E3",
+      "url": "https://www.reuters.com/world/india/example-rbi-500-not-cancelled",
+      "netloc": "reuters.com",
+      "tier": 2,
+      "stance": "refutes",
+      "quote": "There is no RBI order withdrawing every ₹500 note from circulation.",
+      "passage": "There is no RBI order withdrawing every ₹500 note from circulation.",
+      "group_id": "reuters.com",
+      "date": "2024-11-21"
+    }
+  ],
+  "investigate_stats": {
+    "searches": 4,
+    "llm_calls": 1,
+    "queries": [
+      "RBI cancelled every ₹500 note"
+    ],
+    "seconds": 22.0
+  },
+  "audit": {
+    "llm_calls": 3,
+    "searches": 4,
+    "latency_s": 36.0
+  }
+}

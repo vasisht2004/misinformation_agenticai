@@ -1,0 +1,59 @@
+{
+  "claim": "The Reserve Bank of India issues ₹500 denomination notes as legal tender.",
+  "verdict": "True",
+  "confidence": 0.88,
+  "priority": "Low",
+  "provisional": false,
+  "alert_pending_approval": false,
+  "route": "investigate",
+  "match_type": "none",
+  "decision": "store",
+  "gate": "sufficient",
+  "best_match": {},
+  "red_flags": [],
+  "explanation": "The Reserve Bank's own page lists the ₹500 note as a denomination it issues [E1]. A newsroom describes the same notes as legal tender [E2].",
+  "true_version": "The Reserve Bank of India issues ₹500 notes, and notes in circulation are legal tender.",
+  "correction_message": "",
+  "citations": [
+    "E1",
+    "E2"
+  ],
+  "core_detail_only_ids": [],
+  "evidence": [
+    {
+      "id": "E1",
+      "url": "https://www.rbi.org.in/Scripts/examples-currency.html",
+      "netloc": "rbi.org.in",
+      "tier": 1,
+      "stance": "supports",
+      "quote": "The Reserve Bank issues ₹500 denomination notes.",
+      "passage": "The Reserve Bank issues ₹500 denomination notes.",
+      "group_id": "rbi.org.in",
+      "date": "2024-06-01"
+    },
+    {
+      "id": "E2",
+      "url": "https://www.thehindu.com/business/example-rupee-notes-legal-tender",
+      "netloc": "thehindu.com",
+      "tier": 2,
+      "stance": "supports",
+      "quote": "₹500 notes in circulation are legal tender.",
+      "passage": "₹500 notes in circulation are legal tender.",
+      "group_id": "thehindu.com",
+      "date": "2024-06-02"
+    }
+  ],
+  "investigate_stats": {
+    "searches": 2,
+    "llm_calls": 1,
+    "queries": [
+      "RBI issues ₹500 notes legal tender"
+    ],
+    "seconds": 11.0
+  },
+  "audit": {
+    "llm_calls": 2,
+    "searches": 2,
+    "latency_s": 19.5
+  }
+}

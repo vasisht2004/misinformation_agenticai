@@ -1,0 +1,88 @@
+{
+  "claim": "RBI will stop exchanging ₹500 notes at bank counters from next week.",
+  "verdict": null,
+  "confidence": 0.51,
+  "priority": "High",
+  "provisional": true,
+  "review_status": "pending",
+  "review_reason": "The sources disagree, so a person has to judge the claim.",
+  "alert_pending_approval": false,
+  "route": "investigate",
+  "match_type": "none",
+  "decision": "human",
+  "gate": "conflicting",
+  "needs_human": true,
+  "best_match": {},
+  "red_flags": [
+    "Urgency"
+  ],
+  "explanation": "A Reserve Bank page and a wire story say the exchange continues. A newsroom and a government release describe a stop. The verdict is withheld.",
+  "true_version": "",
+  "correction_message": "",
+  "citations": [
+    "E1",
+    "E2",
+    "E3",
+    "E4"
+  ],
+  "core_detail_only_ids": [],
+  "evidence": [
+    {
+      "id": "E1",
+      "url": "https://www.rbi.org.in/Scripts/example-exchange.html",
+      "netloc": "rbi.org.in",
+      "tier": 1,
+      "stance": "refutes",
+      "quote": "Bank counters continue to exchange ₹500 notes.",
+      "passage": "Bank counters continue to exchange ₹500 notes.",
+      "group_id": "rbi.org.in",
+      "date": "2024-11-12"
+    },
+    {
+      "id": "E2",
+      "url": "https://www.thehindu.com/business/example-rbi-exchange-stops",
+      "netloc": "thehindu.com",
+      "tier": 2,
+      "stance": "supports",
+      "quote": "Counters will stop exchanging ₹500 notes from next week.",
+      "passage": "Counters will stop exchanging ₹500 notes from next week.",
+      "group_id": "thehindu.com",
+      "date": "2024-11-13"
+    },
+    {
+      "id": "E3",
+      "url": "https://www.reuters.com/world/india/example-rbi-exchange-continues",
+      "netloc": "reuters.com",
+      "tier": 2,
+      "stance": "refutes",
+      "quote": "The exchange of ₹500 notes at counters has not been stopped.",
+      "passage": "The exchange of ₹500 notes at counters has not been stopped.",
+      "group_id": "reuters.com",
+      "date": "2024-11-13"
+    },
+    {
+      "id": "E4",
+      "url": "https://pib.gov.in/PressReleaseExample500",
+      "netloc": "pib.gov.in",
+      "tier": 1,
+      "stance": "supports",
+      "quote": "Exchange of ₹500 notes at bank counters ends next week.",
+      "passage": "Exchange of ₹500 notes at bank counters ends next week.",
+      "group_id": "pib.gov.in",
+      "date": "2024-11-14"
+    }
+  ],
+  "investigate_stats": {
+    "searches": 5,
+    "llm_calls": 1,
+    "queries": [
+      "RBI stop exchanging ₹500 notes counters"
+    ],
+    "seconds": 24.0
+  },
+  "audit": {
+    "llm_calls": 3,
+    "searches": 5,
+    "latency_s": 40.0
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "kind": "replay",
+  "label": "replay",
+  "route": "reuse_prior",
+  "match_type": "exact",
+  "checkable": true,
+  "decision": "store",
+  "nodes": [
+    {
+      "node": "ingest",
+      "elapsed_s": 0.18
+    },
+    {
+      "node": "extract",
+      "elapsed_s": 1.05
+    },
+    {
+      "node": "memory",
+      "elapsed_s": 0.92
+    },
+    {
+      "node": "prior_match",
+      "elapsed_s": 0.24
+    },
+    {
+      "node": "assess",
+      "elapsed_s": 0.08
+    },
+    {
+      "node": "priority",
+      "elapsed_s": 0.02
+    },
+    {
+      "node": "decide",
+      "elapsed_s": 0.01
+    },
+    {
+      "node": "output",
+      "elapsed_s": 0.03
+    },
+    {
+      "node": "audit",
+      "elapsed_s": 0.02
+    }
+  ]
+}
