@@ -490,6 +490,15 @@ GATE_WEAK_REFUTE = True
 WEAK_REFUTE_MIN_GROUPS = 3
 WEAK_REFUTE_CONFIDENCE_CAP = 0.6
 WEAK_REFUTE_CAVEAT = "Lower-tier sources only: no tier 1-2 source was found."
+# G2R-2. The same path as G2R, but two independent refuting groups are
+# enough, and the confidence cap is lower. Zero support at any tier, and
+# every counted refute still has to pass the relaxed core match. Support
+# is never decided this way. The on/off decision is the combined 16-fact
+# and 50-claim rule in docs/eval_diagnosis.md. Do not flip this because
+# one claim looked better.
+GATE_WEAK_REFUTE_2 = True
+WEAK_REFUTE_2_MIN_GROUPS = 2
+WEAK_REFUTE_2_CONFIDENCE_CAP = 0.5
 # G1. One tier-1 page from the office the claim is about can support or
 # refute on its own when no tier 1-2 group is on the other side. Any other
 # tier-1 site does not: a ministry page about a different subject is not

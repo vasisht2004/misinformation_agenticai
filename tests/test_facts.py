@@ -148,6 +148,7 @@ def test_product_settings_leave_the_gate_flags_off(monkeypatch):
     for name in (
         "GATE_PRIMARY_SOURCE",
         "GATE_WEAK_REFUTE",
+        "GATE_WEAK_REFUTE_2",
         "GATE_SHARED_SOURCE",
         "GATE_EVIDENCE_SCORE",
         "BLOCK_FACTCHECK_SITES",
@@ -159,6 +160,7 @@ def test_product_settings_leave_the_gate_flags_off(monkeypatch):
         monkeypatch.setattr(config, name, getattr(config, name))
     config.GATE_PRIMARY_SOURCE = True
     config.GATE_WEAK_REFUTE = True
+    config.GATE_WEAK_REFUTE_2 = True
     config.GATE_SHARED_SOURCE = True
     config.GATE_EVIDENCE_SCORE = True
     config.BLOCK_FACTCHECK_SITES = True
@@ -168,6 +170,7 @@ def test_product_settings_leave_the_gate_flags_off(monkeypatch):
     assert config.EVAL_DROP_AFTER_CLAIM is False
     assert config.GATE_PRIMARY_SOURCE is False
     assert config.GATE_WEAK_REFUTE is False
+    assert config.GATE_WEAK_REFUTE_2 is False
     assert config.GATE_SHARED_SOURCE is False
     assert config.GATE_EVIDENCE_SCORE is False
     assert config.TAVILY_MONTHLY_MAX == 990

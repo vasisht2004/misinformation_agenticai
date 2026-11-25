@@ -6,6 +6,7 @@ The live test at the bottom is the one run that spends credits.
 """
 
 import json
+import time
 
 import pytest
 
@@ -2869,6 +2870,78 @@ def test_round_two_runs_unused_plan_queries_and_skips_the_topup(monkeypatch):
     assert result["investigate_stats"]["topup_used"] is False
     assert result["investigate_stats"]["topup_queries"] == []
     assert [row["id"] for row in result["evidence"]] == ["E3"]
+
+
+def test_topup_prompt_and_cache_key_ignore_finish_order(monkeypatch):
+    # Two finish orders of the same searches, and two orders of the same
+    # pages, have to hash to one cache file. The key is the prompt.
+    from misinfo_agent.investigate import TopupBatch, topup_prompt
+    from misinfo_agent.llm import _cache_path
+
+    monkeypatch.setattr(config, "LLM_CACHE", True)
+    wiki = Passage(
+        passage_id="P1",
+        url="https://en.wikipedia.org/wiki/States_and_union_territories_of_India",
+        netloc="en.wikipedia.org",
+        title="States",
+        text="India has 28 states.",
+        cos=0.4,
+        fetched=True,
+    )
+    book = Passage(
+        passage_id="P2",
+        url="https://testbook.com/question-answer/states",
+        netloc="testbook.com",
+        title="Quiz",
+        text="28 states.",
+        cos=0.3,
+        fetched=True,
+    )
+    first = [
+        {"stance": "refutes", "quote": "28 states and 8 union territories", "passage": wiki},
+        {"stance": "neutral", "quote": "not evidence", "passage": wiki},
+        {"stance": "refutes", "quote": "28 states in the Indian union", "passage": book},
+    ]
+    second = list(reversed(first))
+    state = {"claim": "India has 29 states in total."}
+    early = ["zeta query", "alpha query", "mid query"]
+    late = ["mid query", "zeta query", "alpha query"]
+    prompt_a = topup_prompt(state, first, early)
+    prompt_b = topup_prompt(state, second, late)
+    assert prompt_a == prompt_b
+    assert "alpha query\nmid query\nzeta query" in prompt_a
+    wiki_at = prompt_a.index("en.wikipedia.org")
+    book_at = prompt_a.index("testbook.com")
+    assert wiki_at < book_at
+    assert "not evidence" not in prompt_a
+    key_a = _cache_path("model", "topup_v1", prompt_a, TopupBatch, None)
+    key_b = _cache_path("model", "topup_v1", prompt_b, TopupBatch, None)
+    assert key_a == key_b
+    assert key_a is not None
+
+
+def test_recorded_queries_follow_issue_order_not_finish_order(monkeypatch):
+    # The worker that finishes first must not become the first stored query.
+    # That list is what the top-up prompt used to hash.
+    import threading
+
+    from misinfo_agent.investigate import Query, _run_queries
+
+    gate = threading.Barrier(2)
+
+    def fake_search(query, **kwargs):
+        gate.wait(timeout=2)
+        if query == "slow":
+            time.sleep(0.05)
+        return []
+
+    monkeypatch.setattr("misinfo_agent.investigate.search", fake_search)
+    ran: list[str] = []
+    _run_queries(
+        [Query(text="slow", kind="neutral"), Query(text="fast", kind="verify")],
+        ran=ran,
+    )
+    assert ran == ["slow", "fast"]
 
 
 def _body(score: str, quote: str) -> str:

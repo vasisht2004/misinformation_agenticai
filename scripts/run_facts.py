@@ -204,6 +204,7 @@ def apply_product() -> None:
     config.LLM_CACHE = True
     config.GATE_PRIMARY_SOURCE = False
     config.GATE_WEAK_REFUTE = False
+    config.GATE_WEAK_REFUTE_2 = False
     config.GATE_SHARED_SOURCE = False
     config.GATE_EVIDENCE_SCORE = False
     config.TAVILY_MONTHLY_MAX = FACTS_SEARCH_BUDGET

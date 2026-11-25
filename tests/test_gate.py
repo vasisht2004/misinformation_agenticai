@@ -598,6 +598,7 @@ def test_weak_refute_needs_three_groups_and_no_support(monkeypatch):
         {"id": "A1", "text": claim, "core": True, "checkable": True},
     ])
     monkeypatch.setattr(config, "GATE_WEAK_REFUTE", False)
+    monkeypatch.setattr(config, "GATE_WEAK_REFUTE_2", False)
     assert gate(state)["atomic_status"]["A1"] == "insufficient"
     monkeypatch.setattr(config, "GATE_WEAK_REFUTE", True)
     out = gate(state)
@@ -613,8 +614,58 @@ def test_weak_refute_needs_three_groups_and_no_support(monkeypatch):
     assert short["atomic_status"]["A1"] == "insufficient"
 
 
+def test_weak_refute_2_accepts_two_groups_and_caps_at_half(monkeypatch):
+    # Same bars as G2R except the count is two and the ceiling is 0.5.
+    # A supporting page of any tier still blocks it, and support is not
+    # decided from lower-tier pages. One group is not enough.
+    from misinfo_agent.assess import assess
+    from misinfo_agent.llm import clear_fake, set_fake
+
+    monkeypatch.setattr(config, "GATE_WEAK_REFUTE", True)
+    monkeypatch.setattr(config, "GATE_WEAK_REFUTE_2", True)
+    claim = "India has 29 states in total."
+    evidence = [
+        _row(1, "en.wikipedia.org", "refutes", 3, quote="India is a federal union comprising 28 states and 8 union territories"),
+        _row(2, "testbook.com", "refutes", 4, quote="At present, there are 28 states in the Indian union."),
+    ]
+    atomic = [{"id": "A1", "text": claim, "core": True, "checkable": True}]
+    out = gate(_state(claim=claim, evidence=evidence, rounds=2, atomic_claims=atomic))
+    assert out["atomic_status"]["A1"] == "refuted"
+    assert out["gate"] == "sufficient"
+    assert config.WEAK_REFUTE_CAVEAT in _joined(out)
+    one = gate(_state(claim=claim, evidence=evidence[:1], rounds=2, atomic_claims=atomic))
+    assert one["atomic_status"]["A1"] == "insufficient"
+    blocked = evidence + [_row(3, "example.com", "supports", 4, quote="India has 29 states")]
+    held = gate(_state(claim=claim, evidence=blocked, rounds=2, atomic_claims=atomic))
+    assert held["atomic_status"]["A1"] == "insufficient"
+    supports = [
+        _row(1, "a.example", "supports", 4, quote="India has 29 states in total."),
+        _row(2, "b.example", "supports", 4, quote="India has 29 states in total."),
+    ]
+    backed = gate(_state(claim=claim, evidence=supports, rounds=2, atomic_claims=atomic))
+    assert backed["atomic_status"]["A1"] == "insufficient"
+    state = _state(claim=claim, evidence=evidence, rounds=2, atomic_claims=atomic)
+    state["claim_date"] = "2026-11-22"
+    state["investigate_stats"] = {"quote_unverified": 0, "topup_used": False, "stance_failed": False}
+    state.update(gate(state))
+    monkeypatch.setattr("misinfo_agent.assess._confidence", lambda *args, **kwargs: 0.9)
+    set_fake(lambda prompt, schema, images: {
+        "atomic": [{"atomic_id": "A1", "explanation": "The pages say 28 states [E1].", "refute_kind": None}],
+        "true_version": "India has 28 states [E1].",
+        "correction_message": "Do not forward this.",
+    })
+    try:
+        card = assess(state)
+    finally:
+        clear_fake()
+    assert card["verdict"] == "Misleading"
+    assert card["confidence"] == config.WEAK_REFUTE_2_CONFIDENCE_CAP
+    assert config.WEAK_REFUTE_CAVEAT in card["caveats"]
+
+
 def test_weak_refute_does_not_support_and_drops_an_off_topic_denial(monkeypatch):
     monkeypatch.setattr(config, "GATE_WEAK_REFUTE", True)
+    monkeypatch.setattr(config, "GATE_WEAK_REFUTE_2", False)
     claim = "India has 29 states in total."
     supports = [
         _row(1, "a.example", "supports", 4, quote="India has 29 states in total."),
@@ -637,7 +688,9 @@ def test_weak_refute_caps_confidence_and_maps_a_missing_kind(monkeypatch):
     from misinfo_agent.assess import assess
     from misinfo_agent.llm import clear_fake, set_fake
 
+    # The 0.6 ceiling is G2R. G2R-2's 0.5 ceiling is a separate test.
     monkeypatch.setattr(config, "GATE_WEAK_REFUTE", True)
+    monkeypatch.setattr(config, "GATE_WEAK_REFUTE_2", False)
     claim = "India has 29 states in total."
     evidence = [
         _row(1, "en.wikipedia.org", "refutes", 3, quote="India is a federal union comprising 28 states and 8 union territories"),
@@ -758,9 +811,10 @@ def test_evidence_score_is_asymmetric_and_uses_the_threshold(monkeypatch):
 
     claim = "RBI banned the note."
     day = "2024-06-01"
-    # The shipped weak-refute flag would decide three tier-3 denials
-    # before theta is read. This case is the score, so that path stays off.
+    # The shipped weak-refute flags would decide three tier-3 denials
+    # before theta is read. This case is the score, so those paths stay off.
     monkeypatch.setattr(config, "GATE_WEAK_REFUTE", False)
+    monkeypatch.setattr(config, "GATE_WEAK_REFUTE_2", False)
     monkeypatch.setattr(config, "GATE_EVIDENCE_SCORE", True)
     monkeypatch.setattr(config, "GATE_EVIDENCE_THETA", 0.8)
     lower = [

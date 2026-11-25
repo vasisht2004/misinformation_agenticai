@@ -304,12 +304,20 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
         # A lower-tier companion does not make that page a second office.
         reasons.extend(stale_refute)
 
-    # Three lower-tier denials, and not a single page on the other side.
+    # Lower-tier denials, and not a single page on the other side.
     # Checked after the credible-refute rule so a tier 1-2 source still
     # uses the ordinary sentence and is not capped as a weak refute.
-    if config.GATE_WEAK_REFUTE and _is_core(state, aid):
+    # G2R asks for three groups. G2R-2 asks for two and caps confidence
+    # lower. Either way a supporting page of any tier returns no groups,
+    # and support is never decided on this path.
+    if (config.GATE_WEAK_REFUTE or config.GATE_WEAK_REFUTE_2) and _is_core(state, aid):
         weak = _weak_refute_groups(all_rows, text)
-        if len(weak) >= config.WEAK_REFUTE_MIN_GROUPS:
+        minimum = (
+            config.WEAK_REFUTE_2_MIN_GROUPS
+            if config.GATE_WEAK_REFUTE_2
+            else config.WEAK_REFUTE_MIN_GROUPS
+        )
+        if len(weak) >= minimum:
             reasons.insert(
                 0,
                 f"{aid} is refuted: {len(weak)} independent groups refute it, "

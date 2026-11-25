@@ -228,7 +228,15 @@ def assess(state: dict) -> dict:
     # The photo path has its own sentence: a tier 1-2 provenance refute
     # does not wear it, and is not capped.
     if _weak_caveat(state) and verdict in {"False", "Misleading"}:
-        confidence = min(confidence, float(config.WEAK_REFUTE_CONFIDENCE_CAP))
+        # G2R-2 uses the same caveat sentence and a lower ceiling. The
+        # flag, not the number of groups, picks the ceiling: a three-group
+        # refute under G2R-2 is still the looser rule.
+        cap = (
+            config.WEAK_REFUTE_2_CONFIDENCE_CAP
+            if config.GATE_WEAK_REFUTE_2
+            else config.WEAK_REFUTE_CONFIDENCE_CAP
+        )
+        confidence = min(confidence, float(cap))
     if _photo_weak_caveat(state) and verdict in {"False", "Misleading"}:
         confidence = min(confidence, float(config.PHOTO_WEAK_REFUTE_CONFIDENCE_CAP))
     citations = _citations(explanations, true_version, what_we_found)
@@ -999,7 +1007,7 @@ def _weak_caveat(state: dict) -> list[str]:
     The flag alone is not enough. A normal two-newsroom refute must not
     wear this caveat or this cap.
     """
-    if not config.GATE_WEAK_REFUTE:
+    if not (config.GATE_WEAK_REFUTE or config.GATE_WEAK_REFUTE_2):
         return []
     needle = config.WEAK_REFUTE_CAVEAT
     if any(needle in str(item) for item in (state.get("gate_reasons") or [])):

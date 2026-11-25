@@ -1929,24 +1929,45 @@ def _topup(state, labelled, passages, already):
     return True, extra_labelled, chosen, bundle["pages"], ran, unverified, joined
 
 
-def propose_topup(state: dict, labelled: list[dict], already: list[str]) -> TopupBatch:
-    """One call. The prompt file holds the rules; the code caps the list at two."""
+def topup_prompt(state: dict, labelled: list[dict], already: list[str]) -> str:
+    """The top-up prompt. Shuffling its inputs must not change a byte of it.
+
+    The LLM cache key is a hash of this text. Searches finish on a thread
+    pool, so the "already searched" list used to arrive in finish order,
+    and the same claim missed the cache and proposed a different query.
+    Sorting by the query text makes the key depend on the set of queries.
+    The found lines are sorted for the same reason, and the eight-line cap
+    is applied after that sort, so which lines survive is also not an
+    arrival order. Neutrals are not evidence and stay out of the prompt.
+    """
     found = []
     for row in labelled:
-        if row["stance"] == "neutral":
+        if row.get("stance") == "neutral":
             continue
-        passage = row["passage"]
+        passage = row.get("passage")
+        if passage is None:
+            continue
         found.append(
-            f"{passage.netloc} tier {credibility_tier(passage.url)} {row['stance']}: {row['quote']}"
+            f"{passage.netloc} tier {credibility_tier(passage.url)} "
+            f"{row.get('stance')}: {row.get('quote') or ''}"
         )
+    # Lexicographic, not finish order. Equal lines stay together; the
+    # prompt bytes do not change if those equals swap.
+    found.sort()
     found_text = "\n".join(found[:8]) if found else "Nothing supported or refuted the claim."
-    searched = "\n".join(already) if already else "(none)"
-    prompt = (
+    ordered = sorted(str(item) for item in already if str(item).strip())
+    searched = "\n".join(ordered) if ordered else "(none)"
+    return (
         _TOPUP_PATH.read_text(encoding="utf-8")
         .replace("__CLAIM__", _claim_text(state) or "(none)")
         .replace("__FOUND__", found_text)
         .replace("__SEARCHED__", searched)
     )
+
+
+def propose_topup(state: dict, labelled: list[dict], already: list[str]) -> TopupBatch:
+    """One call. The prompt file holds the rules; the code caps the list at two."""
+    prompt = topup_prompt(state, labelled, already)
     return call_structured(
         prompt,
         TopupBatch,
@@ -2265,7 +2286,7 @@ def _run_queries(
     def run(query: Query):
         nonlocal stop
         if stop:
-            return query, []
+            return query, [], False
         # The kind is in the purpose because the usage row has no kind
         # field of its own, and box 16 already stores purpose.
         # A failed line is a miss. The other lines still stand. The quota
@@ -2284,18 +2305,23 @@ def _run_queries(
             _remember_cap(capped, exc.cap)
             if cap_reasons is not None and str(exc) not in cap_reasons:
                 cap_reasons.append(str(exc))
-            return query, []
+            # Not recorded. The next round can still try a query the cap refused.
+            return query, [], False
         except SearchError:
-            if ran is not None:
-                ran.append(query.text)
-            return query, []
-        if ran is not None:
-            ran.append(query.text)
-        return query, hits
+            return query, [], True
+        return query, hits, True
 
     workers = min(4, len(queries))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(run, queries))
+        # map keeps issue order. Appending inside the worker used to record
+        # finish order, and that order was the top-up prompt. Two runs of
+        # the same claim then hashed to two cache keys.
+        finished = list(pool.map(run, queries))
+    if ran is not None:
+        for query, _hits, keep in finished:
+            if keep:
+                ran.append(query.text)
+    return [(query, hits) for query, hits, _keep in finished]
 
 
 def _remember_cap(capped: list | None, kind: str | None) -> None:
