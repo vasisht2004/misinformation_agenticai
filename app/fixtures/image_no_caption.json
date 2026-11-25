@@ -1,0 +1,63 @@
+{
+  "input_type": "image",
+  "caption": "",
+  "claim": "",
+  "verdict": "Other",
+  "confidence": null,
+  "priority": "Low",
+  "provisional": false,
+  "alert_pending_approval": false,
+  "route": "investigate",
+  "match_type": "none",
+  "decision": "store",
+  "gate": "skipped",
+  "checkable": false,
+  "search_status": "not_needed",
+  "best_match": {},
+  "red_flags": [],
+  "explanation": "Nothing in this photo is a claim that can be checked.",
+  "true_version": "",
+  "correction_message": "",
+  "image_consistency": {
+    "consistent": "unclear",
+    "mismatches": [],
+    "place_clues": [
+      "indoor hall"
+    ],
+    "time_clues": []
+  },
+  "image_provenance": {
+    "vision_status": "ok",
+    "best_guess": [],
+    "first_seen": {
+      "date": "2021-08-19",
+      "url": "https://archive.example/2021/08/hall-photo",
+      "host": "archive.example",
+      "tier": 4
+    },
+    "matches": [
+      {
+        "url": "https://archive.example/2021/08/hall-photo",
+        "host": "archive.example",
+        "tier": 4,
+        "date": "2021-08-19",
+        "match": "full",
+        "stance": "neutral",
+        "quote": "Posted with no caption.",
+        "group_id": "archive.example"
+      },
+      {
+        "url": "http://notes.example/same-hall",
+        "host": "notes.example",
+        "tier": 4,
+        "date": null,
+        "match": "partial",
+        "stance": "neutral",
+        "quote": "Same hall, no date on the page.",
+        "group_id": "notes.example"
+      }
+    ]
+  },
+  "image_memory_hit": null,
+  "evidence": []
+}

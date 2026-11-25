@@ -547,6 +547,9 @@ def _render_card(model: dict, *, fixture: str, highlight: str) -> None:
     if banner:
         st.markdown(banner, unsafe_allow_html=True)
     st.markdown(components.verdict_html(model), unsafe_allow_html=True)
+    image_block = components.image_check_html(model)
+    if image_block:
+        st.markdown(image_block, unsafe_allow_html=True)
     # The evidence lean is computed from the rows. It sits above the
     # model lean, which stays the dashed, weaker guess.
     source_lean = components.evidence_lean_html(model)
@@ -725,6 +728,7 @@ def _page_check(fixture: str) -> None:
         elif mode == "Link":
             st.text_input("Link", key="link_url", placeholder="https://")
         else:
+            st.markdown(components.image_prompt_html(), unsafe_allow_html=True)
             preview = st.session_state.get("example_image")
             if preview:
                 st.image(preview, width=420)
@@ -829,6 +833,8 @@ def _submit_check(mode: str, uploaded) -> None:
             image = uploaded.getvalue()
         if not image:
             problem = "Add an image first."
+        elif components.image_too_large(len(image)):
+            problem = "That image is over the 10 MB limit."
     if problem:
         st.session_state.form_error = problem
         return

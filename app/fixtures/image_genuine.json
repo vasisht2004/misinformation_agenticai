@@ -1,0 +1,93 @@
+{
+  "input_type": "image",
+  "caption": "The new riverside library in Alderport opened on 4 June 2024.",
+  "claim": "The riverside library in Alderport opened on 4 June 2024.",
+  "verdict": "True",
+  "refute_kind": null,
+  "confidence": 0.86,
+  "priority": "Low",
+  "provisional": false,
+  "alert_pending_approval": false,
+  "route": "investigate",
+  "match_type": "none",
+  "decision": "store",
+  "gate": "sufficient",
+  "search_status": "ran",
+  "best_match": {},
+  "red_flags": [],
+  "explanation": "The town's own page says the riverside library opened on 4 June 2024, and a second newsroom reported the opening the next day.",
+  "true_version": "The riverside library in Alderport opened on 4 June 2024.",
+  "correction_message": "The riverside library in Alderport did open on 4 June 2024.",
+  "image_path": "placeholder.jpg",
+  "image_consistency": {
+    "consistent": "yes",
+    "mismatches": [],
+    "place_clues": [
+      "river front",
+      "glass library"
+    ],
+    "time_clues": [
+      "summer afternoon",
+      "June light"
+    ]
+  },
+  "image_provenance": {
+    "vision_status": "ran",
+    "best_guess": [
+      "A glass building beside a river"
+    ],
+    "first_seen": {
+      "date": "2024-06-04",
+      "url": "https://alderport.example/news/library-opens",
+      "host": "alderport.example",
+      "tier": 1
+    },
+    "matches": [
+      {
+        "url": "https://gazette.example/2024/06/alderport-library",
+        "host": "gazette.example",
+        "tier": 2,
+        "date": "2024-06-05",
+        "match": "full",
+        "stance": "supports",
+        "quote": "Crowds filled the new riverside library the day after it opened.",
+        "group_id": "gazette.example"
+      },
+      {
+        "url": "https://alderport.example/news/library-opens",
+        "host": "alderport.example",
+        "tier": 1,
+        "date": "2024-06-04",
+        "match": "full",
+        "stance": "supports",
+        "quote": "The riverside library opened to readers on 4 June 2024.",
+        "group_id": "alderport.example"
+      }
+    ]
+  },
+  "image_memory_hit": null,
+  "evidence": [
+    {
+      "id": "E1",
+      "url": "https://alderport.example/news/library-opens",
+      "netloc": "alderport.example",
+      "tier": 1,
+      "stance": "supports",
+      "quote": "The riverside library opened to readers on 4 June 2024.",
+      "passage": "The riverside library opened to readers on 4 June 2024.",
+      "group_id": "alderport.example",
+      "date": "2024-06-04"
+    },
+    {
+      "id": "E2",
+      "url": "https://gazette.example/2024/06/alderport-library",
+      "netloc": "gazette.example",
+      "tier": 2,
+      "stance": "supports",
+      "quote": "Crowds filled the new riverside library the day after it opened.",
+      "passage": "Crowds filled the new riverside library the day after it opened.",
+      "group_id": "gazette.example",
+      "date": "2024-06-05"
+    }
+  ]
+}

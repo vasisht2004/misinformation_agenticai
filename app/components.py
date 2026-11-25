@@ -5,16 +5,20 @@ can reach unsafe_allow_html. A javascript: URL is not a link: only http
 and https are written into href, and those links carry rel="noopener
 noreferrer". The engine is adding card fields in parallel with this UI,
 so each new field is read with .get() and a default. A card from before
-that merge still renders.
+that merge still renders. Image provenance, the caption check, and an
+image memory hit are the same kind of field: absent means that block
+is skipped, and a text card does not grow an image section.
 
 The figures on How it works live in STATS and nowhere else.
 """
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import re
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -106,6 +110,20 @@ _SEARCH_NODES = {"memory", "prior_match", "investigate", "gate"}
 _MISSING = object()
 _CITE = re.compile(r"\[([A-Za-z][A-Za-z0-9]{0,11})\]")
 _FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+
+# The image tab. Ingest rejects anything over 10 MB, and the Streamlit
+# server cap is the same number. The sentence is the tab copy; the
+# limit stays on the page beside it.
+IMAGE_TAB_COPY = (
+    "Upload a photo of an event (optional caption). "
+    "We check where it first appeared online."
+)
+IMAGE_BYTE_LIMIT = 10 * 1024 * 1024
+
+# Out of context is still Misleading. The hero says which kind, because
+# "Misleading" alone does not tell a reader the photo is real and the
+# story around it is not.
+_OUT_OF_CONTEXT_LABEL = "MISLEADING · OUT OF CONTEXT"
 
 # What each of the 16 boxes is for, in the order a claim meets them.
 # The arrow list is the how-it-works page. Copy stays short on purpose:
@@ -412,6 +430,61 @@ def _merge_evidence(state: dict, result: dict) -> list[dict]:
     return merged
 
 
+def _optional_dict(result: dict, state: dict, key: str):
+    """A dict field, or None when the engine has not added it yet.
+
+    A stored null and a missing key both mean "nothing to draw". A list
+    or a string under the same name is ignored: the card would otherwise
+    iterate characters or crash on .get.
+    """
+    value = _pick(result, state, key, None)
+    return value if isinstance(value, dict) else None
+
+
+def _refute_kind(result: dict, state: dict) -> str:
+    """The kind the hero is allowed to name.
+
+    A top-level kind wins when the card already copied it. Otherwise the
+    core atomic claim wins, then A1. A kind that lives only on a side
+    claim must not relabel the whole card.
+    """
+    direct = _pick(result, state, "refute_kind", None)
+    if isinstance(direct, str):
+        text = direct.strip()
+        if text and text.lower() not in {"none", "null"}:
+            return text
+    atomic = _pick(result, state, "atomic_results", None)
+    if not isinstance(atomic, list):
+        return ""
+    claims = _pick(result, state, "atomic_claims", None)
+    core_id = ""
+    if isinstance(claims, list):
+        for item in claims:
+            if isinstance(item, dict) and item.get("core"):
+                core_id = str(item.get("id") or item.get("atomic_id") or "")
+                break
+    fallback = ""
+    for item in atomic:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("refute_kind", None)
+        if not isinstance(kind, str):
+            continue
+        text = kind.strip()
+        if not text or text.lower() in {"none", "null"}:
+            continue
+        aid = str(item.get("atomic_id") or item.get("id") or "")
+        if core_id and aid == core_id:
+            return text
+        if core_id:
+            # A side claim's kind must not relabel the card. The core
+            # is the only atomic result the verdict rule reads.
+            continue
+        if not fallback or aid == "A1":
+            fallback = text
+    return fallback
+
+
 def view_model(state: dict | None = None, result: dict | None = None) -> dict:
     """The flat card the HTML builders draw. Missing new fields stay at defaults."""
     state = state if isinstance(state, dict) else {}
@@ -501,6 +574,9 @@ def view_model(state: dict | None = None, result: dict | None = None) -> dict:
         "unverifiable_reason": "" if reason_code is None else str(reason_code),
         "unverifiable_plain": plain_unverifiable(reason_code),
         "model_lean": lean,
+        "photo_lean": _pick(result, state, "photo_lean", None)
+        if isinstance(_pick(result, state, "photo_lean", None), dict)
+        else None,
         "core_detail_only_ids": [str(item) for item in core_ids],
         "seen_site": seen.get("site") or best.get("site") or "",
         "seen_date": seen.get("date") or best.get("date") or "",
@@ -517,6 +593,13 @@ def view_model(state: dict | None = None, result: dict | None = None) -> dict:
         "gate": state.get("gate", "") or "",
         "decision": _pick(result, state, "decision", "") or "",
         "checkable": state.get("checkable", True),
+        "input_type": str(_pick(result, state, "input_type", "") or ""),
+        "caption": str(_pick(result, state, "caption", "") or ""),
+        "image_path": str(_pick(result, state, "image_path", "") or ""),
+        "refute_kind": _refute_kind(result, state),
+        "image_provenance": _optional_dict(result, state, "image_provenance"),
+        "image_consistency": _optional_dict(result, state, "image_consistency"),
+        "image_memory_hit": _optional_dict(result, state, "image_memory_hit"),
     }
 
 
@@ -750,7 +833,14 @@ def stepper_html(ran=None, state=None, *, settled: bool = False, replay: bool = 
     return "".join(bits)
 
 
-def _verdict_kind(verdict, gate: str) -> tuple[str, str]:
+def _verdict_kind(verdict, gate: str, refute_kind: str = "") -> tuple[str, str]:
+    # Out of context is a reason for Misleading, not a sixth verdict.
+    # True, False, and Unverifiable keep their own word: this kind must
+    # not paint those as a photo caption problem.
+    if str(refute_kind or "").strip().lower() == "out_of_context":
+        text = "" if verdict is None else str(verdict).strip()
+        if text.casefold() in {"", "misleading"}:
+            return _OUT_OF_CONTEXT_LABEL, "misleading"
     text = "" if verdict is None else str(verdict).strip()
     if not text:
         if str(gate or "").lower() == "conflicting":
@@ -813,7 +903,11 @@ def verdict_html(model: dict, *, compact: bool = False) -> str:
     verdict colour so a draft is not a grey label.
     """
     model = model or {}
-    label, kind = _verdict_kind(model.get("verdict", None), model.get("gate", ""))
+    label, kind = _verdict_kind(
+        model.get("verdict", None),
+        model.get("gate", ""),
+        model.get("refute_kind", ""),
+    )
     color = _VERDICT_COLOR.get(kind, _VERDICT_COLOR["other"])
     bits = []
     if model.get("provisional", False):
@@ -861,10 +955,19 @@ def verdict_html(model: dict, *, compact: bool = False) -> str:
     below = ""
     if kind != "unverifiable" and plain:
         below = f"<p class='fl-plain-reason'>{esc(plain)}</p>"
-    size = "font-size: 2.6rem;" if compact else ""
+    # The long label does not fit the single-word hero size. Compact is
+    # the queue, where 2.6rem of that sentence would wrap off the row.
+    context = label == _OUT_OF_CONTEXT_LABEL
+    word_class = "fl-verdict-word is-context" if context else "fl-verdict-word"
+    if compact and context:
+        size = "font-size: 1.65rem;"
+    elif compact:
+        size = "font-size: 2.6rem;"
+    else:
+        size = ""
     bits.append(
         "<div class='fl-verdict-row'>"
-        f"<div><h2 class='fl-verdict-word' style='color: {esc(color)}; {size}'>{esc(label)}</h2>"
+        f"<div><h2 class='{word_class}' style='color: {esc(color)}; {size}'>{esc(label)}</h2>"
         f"{chip}{caveat_html}{under}</div>"
         f"{ring}"
         "</div>"
@@ -956,6 +1059,30 @@ def _tier_span(tiers: list[int]) -> str:
     if lo == hi:
         return f"all tier {lo}"
     return f"all tier {lo}-{hi}"
+
+
+def photo_lean_html(model: dict) -> str:
+    """Where the file has been, from provenance. Every image card, any verdict.
+
+    The sources-lean sentence above is only for Unverifiable. This one is
+    the photograph's own history and does not depend on the label.
+    """
+    lean = (model or {}).get("photo_lean")
+    if not isinstance(lean, dict):
+        return ""
+    year = lean.get("first_seen_year")
+    if year is None or year == "":
+        return ""
+    try:
+        count = int(lean.get("n_sites") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    line = f"This photo has been online since at least {year} ({count} sites)"
+    return (
+        "<aside class='fl-src-lean'>"
+        f"<strong>{esc(line)}</strong>"
+        "</aside>"
+    )
 
 
 def lean_html(model: dict) -> str:
@@ -1256,11 +1383,549 @@ def stance_tier_rows(rows) -> list[dict]:
     ]
 
 
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_MONTH_NUM = {name[:3].lower(): index + 1 for index, name in enumerate(_MONTHS)}
+
+# Fixed sentences. vision_status is never printed: an error string from
+# the client can carry the key, and the page must not become a channel
+# for it.
+_VISION_PLAIN = {
+    "no_key": "Reverse image search isn't set up",
+    "monthly_cap": "Reverse image search limit reached this month",
+    "error": "Reverse image search failed; the result uses other evidence only",
+}
+_VISION_OK = frozenset({"ok", "ran", "done", "ready"})
+
+
+def image_prompt_html() -> str:
+    """The image tab's sentence, plus the size limit it does not replace."""
+    return (
+        f"<p class='fl-image-prompt'>{esc(IMAGE_TAB_COPY)}</p>"
+        "<p class='fl-muted'>Up to 10 MB.</p>"
+    )
+
+
+def image_too_large(size) -> bool:
+    """True when the upload is past the 10 MB ingest limit.
+
+    Equal to the limit is still accepted. Ingest rejects only a file
+    that is larger than 10 MB.
+    """
+    try:
+        return int(size) > IMAGE_BYTE_LIMIT
+    except (TypeError, ValueError):
+        return False
+
+
+def vision_banner_text(provenance) -> str:
+    """Plain words for a reverse-image search that did not run.
+
+    Only the three known codes are mapped. Anything else, including a
+    status that embeds a key, is dropped rather than shown.
+    """
+    if not isinstance(provenance, dict):
+        return ""
+    raw = provenance.get("vision_status", "")
+    text = "" if raw is None else str(raw).strip().lower()
+    if not text:
+        return ""
+    token = text.replace("-", "_").split()[0].strip(":,;")
+    return _VISION_PLAIN.get(token, "")
+
+
+def vision_banner_html(provenance) -> str:
+    text = vision_banner_text(provenance)
+    if not text:
+        return ""
+    return f"<div class='fl-vision-banner'>{esc(text)}</div>"
+
+
+def _str_list(value) -> list[str]:
+    """Strings from a list. A single string is one tag. Anything else is skipped."""
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    found = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            found.append(text)
+    return found
+
+
+def _parse_date(value):
+    """A (year, month, day) tuple, or None when the string cannot sit on a timeline.
+
+    Year-only and year-month strings still sort. A sentence is undated:
+    putting it at the left would pretend it was the earliest copy.
+    """
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        return None
+    iso = re.fullmatch(r"(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?", raw)
+    if iso:
+        year = int(iso.group(1))
+        month = int(iso.group(2) or 1)
+        day = int(iso.group(3) or 1)
+    else:
+        written = re.fullmatch(r"(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})", raw)
+        if not written:
+            return None
+        month = _MONTH_NUM.get(written.group(2)[:3].lower())
+        if not month:
+            return None
+        day = int(written.group(1))
+        year = int(written.group(3))
+    try:
+        date(year, month, day)
+    except (TypeError, ValueError):
+        return None
+    return (year, month, day)
+
+
+def _format_date(value) -> str:
+    raw = "" if value is None else str(value).strip()
+    parsed = _parse_date(raw)
+    if parsed is None:
+        return raw
+    year, month, day = parsed
+    if re.fullmatch(r"\d{4}", raw):
+        return raw
+    if re.fullmatch(r"\d{4}-\d{2}", raw):
+        return f"{_MONTHS[month - 1]} {year}"
+    return f"{day} {_MONTHS[month - 1]} {year}"
+
+
+def _stance_class(value) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    if text in {"refutes", "refute", "refuted"}:
+        return "is-refutes"
+    if text in {"supports", "support", "supported"}:
+        return "is-supports"
+    return "is-neutral"
+
+
+def _match_words(value) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    text = text.replace("-", "_").replace(" ", "_")
+    if text in {"full", "exact", "full_match"}:
+        return "Full match"
+    if text in {"partial", "partial_match", "near"}:
+        return "Partial match"
+    if not text:
+        return ""
+    words = text.replace("_", " ")
+    return words[:1].upper() + words[1:]
+
+
+def _host_of(row: dict) -> str:
+    host = str(row.get("host") or "").strip()
+    if host:
+        return host
+    url = row.get("url") or ""
+    try:
+        host = urlsplit(str(url)).netloc
+    except ValueError:
+        host = ""
+    return host or "unknown source"
+
+
+def _image_mime(data: bytes) -> str | None:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _resolve_image(path) -> Path | None:
+    """The stored JPEG, if it is a real file.
+
+    A live run stores an absolute path. A fixture stores a file name
+    next to the JSON. The path is never written into the page: only
+    bytes that pass the image-magic check are embedded, and a missing
+    file becomes the empty frame.
+    """
+    text = "" if path is None else str(path).strip()
+    if not text or len(text) > 1024 or any(ch in text for ch in "\x00\r\n"):
+        return None
+    try:
+        candidate = Path(text)
+    except (TypeError, ValueError):
+        return None
+    root = _FIXTURE_DIR.parent.parent
+    options = []
+    if candidate.is_absolute():
+        options.append(candidate)
+    else:
+        options.append(Path.cwd() / candidate)
+        options.append(root / candidate)
+        options.append(_FIXTURE_DIR / candidate)
+        options.append(_FIXTURE_DIR / candidate.name)
+    for option in options:
+        try:
+            if option.is_file():
+                return option
+        except OSError:
+            continue
+    return None
+
+
+def _embed_image(path) -> str | None:
+    resolved = _resolve_image(path)
+    if resolved is None:
+        return None
+    try:
+        size = resolved.stat().st_size
+        if size <= 0 or size > 2_000_000:
+            return None
+        data = resolved.read_bytes()
+    except OSError:
+        return None
+    mime = _image_mime(data)
+    if mime is None:
+        return None
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _thumb_html(path) -> str:
+    src = _embed_image(path)
+    if not src:
+        return (
+            "<div class='fl-thumb fl-thumb-missing' role='img' "
+            "aria-label='Image not stored'><span>Image not stored</span></div>"
+        )
+    # src is a data URI we built from magic-checked bytes. It is not the
+    # path, and it is not a claim string, so it is not escaped.
+    return f"<img class='fl-thumb' alt='Submitted image' src='{src}'>"
+
+
+def _clue_html(consistency, provenance) -> str:
+    consistency = consistency if isinstance(consistency, dict) else {}
+    provenance = provenance if isinstance(provenance, dict) else {}
+    places = _str_list(consistency.get("place_clues", None))
+    times = _str_list(consistency.get("time_clues", None))
+    guesses = _str_list(provenance.get("best_guess", None))
+    if not places and not times and not guesses:
+        return ""
+    bits = ["<div class='fl-sees'>", "<p class='fl-sees-title'>What the AI sees</p>"]
+
+    def chips(label: str, items: list[str]) -> None:
+        if not items:
+            return
+        bits.append(f"<div class='fl-clue-k'>{esc(label)}</div><div class='fl-clue-row'>")
+        for item in items:
+            bits.append(f"<span class='fl-chip fl-clue'>{esc(item)}</span>")
+        bits.append("</div>")
+
+    chips("Place", places)
+    chips("Time", times)
+    # best_guess is the model's description of the pixels. It sits with
+    # the clues, under the same "not a verdict" section, so it cannot
+    # be read as the card's decision.
+    chips("Looks like", guesses)
+    bits.append("</div>")
+    return "".join(bits)
+
+
+def _consistency_html(consistency) -> str:
+    """Yes is a muted green line. No is an amber list. Anything else is grey.
+
+    Mismatches are listed only for no. A yes that also carries mismatches
+    would contradict the line, so those rows stay off the card.
+    """
+    if not isinstance(consistency, dict) or not consistency:
+        return ""
+    raw = consistency.get("consistent", None)
+    if raw is None or str(raw).strip() == "":
+        return ""
+    kind = str(raw).strip().lower()
+    note = "<p class='fl-observe'>AI observation — not a verdict</p>"
+    if kind == "yes":
+        return (
+            "<div class='fl-cap-yes'>"
+            "<p>The caption matches what the image shows.</p>"
+            f"{note}</div>"
+        )
+    if kind == "no":
+        items = []
+        mismatches = consistency.get("mismatches", None)
+        if isinstance(mismatches, (list, tuple)):
+            for row in mismatches:
+                if not isinstance(row, dict):
+                    continue
+                detail = str(row.get("detail") or "").strip()
+                observed = str(row.get("observed") or "").strip()
+                expected = str(row.get("expected") or "").strip()
+                if not (detail or observed or expected):
+                    continue
+                if detail:
+                    line = f"{detail}: {observed} vs {expected}"
+                else:
+                    line = f"{observed} vs {expected}"
+                items.append(f"<li>{esc(line)}</li>")
+        listing = f"<ul>{''.join(items)}</ul>" if items else ""
+        return (
+            "<div class='fl-cap-no'>"
+            "<p>The caption does not match the image.</p>"
+            f"{listing}{note}</div>"
+        )
+    return (
+        "<div class='fl-cap-unclear'>"
+        "<p>It is unclear whether the caption matches the image.</p>"
+        f"{note}</div>"
+    )
+
+
+def _match_body_html(row: dict, *, visible: bool) -> str:
+    host = _host_of(row)
+    tier_label, tier_css = _tier_badge(row.get("tier", None))
+    kind = _match_words(row.get("match", ""))
+    quote = str(row.get("quote") or "").strip()
+    klass = "fl-undated-body" if visible else "fl-tl-pop"
+    bits = [
+        f"<div class='{klass}'>",
+        f"<strong>{esc(host)}</strong> ",
+        f"<span class='fl-tier {tier_css}'>{esc(tier_label)}</span>",
+    ]
+    if kind:
+        bits.append(f" <span class='fl-muted'>{esc(kind)}</span>")
+    if quote:
+        bits.append(f"<p class='fl-tl-quote'>{esc(quote)}</p>")
+    # safe_href drops javascript: and data:. The host still shows as text.
+    if safe_href(row.get("url", "")):
+        bits.append(f"<div>{anchor(row.get('url', ''), 'View page')}</div>")
+    bits.append("</div>")
+    return "".join(bits)
+
+
+def _split_matches(matches) -> tuple[list[dict], list[dict]]:
+    if not isinstance(matches, (list, tuple)):
+        return [], []
+    dated = []
+    undated = []
+    for item in matches:
+        if not isinstance(item, dict):
+            continue
+        when = _parse_date(item.get("date", None))
+        if when is None:
+            undated.append(item)
+        else:
+            dated.append((when, item))
+    dated.sort(key=lambda pair: pair[0])
+    return [item for _when, item in dated], undated
+
+
+def _first_seen_html(provenance: dict) -> str:
+    first = provenance.get("first_seen", None) if isinstance(provenance, dict) else None
+    if not isinstance(first, dict):
+        return ""
+    when = _format_date(first.get("date", ""))
+    host = str(first.get("host") or "").strip()
+    if not host:
+        try:
+            host = urlsplit(str(first.get("url") or "")).netloc
+        except ValueError:
+            host = ""
+    if not when and not host and not safe_href(first.get("url", "")):
+        return ""
+    tier_label, tier_css = _tier_badge(first.get("tier", None))
+    link = anchor(first.get("url", ""), "View page") if safe_href(first.get("url", "")) else ""
+    host_html = esc(host) if host else "Unknown host"
+    date_html = esc(when) if when else "Date unknown"
+    return (
+        "<div class='fl-first'>"
+        "<p class='fl-first-title'>First seen online</p>"
+        f"<p class='fl-first-date'>{date_html}</p>"
+        f"<p class='fl-first-meta'>{host_html} "
+        f"<span class='fl-tier {tier_css}'>{esc(tier_label)}</span> "
+        f"{link}</p>"
+        "</div>"
+    )
+
+
+def _timeline_html(dated: list[dict]) -> str:
+    if not dated:
+        return ""
+    # Oldest is first after the sort, and it is the point the section
+    # is about, so it is coral and larger even when its stance is
+    # support or neutral. Later points keep the stance colour.
+    bits = ["<div class='fl-timeline'><div class='fl-tl-row'>"]
+    for index, row in enumerate(dated):
+        classes = f"fl-tl-point {_stance_class(row.get('stance', ''))}"
+        if index == 0:
+            classes += " is-first"
+        when = _format_date(row.get("date", ""))
+        ident = f"fl-tl-{index}"
+        bits.append(
+            f"<div class='{classes}'>"
+            f"<input class='fl-tl-toggle' type='checkbox' id='{ident}'>"
+            f"<label class='fl-tl-mark' for='{ident}'>"
+            f"<span class='fl-tl-dot'></span>"
+            f"<span class='fl-tl-date'>{esc(when)}</span>"
+            "</label>"
+            f"{_match_body_html(row, visible=False)}"
+            "</div>"
+        )
+    bits.append("</div></div>")
+    return "".join(bits)
+
+
+def _undated_html(rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    bits = ["<div class='fl-undated'>", "<p class='fl-muted'>Undated matches</p>"]
+    for row in rows:
+        bits.append(
+            "<article class='fl-undated-row'>"
+            f"<span class='fl-tl-dot {_stance_class(row.get('stance', ''))}'></span>"
+            f"{_match_body_html(row, visible=True)}"
+            "</article>"
+        )
+    bits.append("</div>")
+    return "".join(bits)
+
+
+def _distance_text(value) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if number != number:
+        return ""
+    return f" · distance {number:.2f}"
+
+
+def _image_memory_html(hit) -> str:
+    """Same shell as the text 'Seen before' block. Verdict and first seen only.
+
+    thread_id is the run id. It does not help a reader judge the photo,
+    so it stays off the card.
+    """
+    if not isinstance(hit, dict) or not hit:
+        return ""
+    verdict = str(hit.get("verdict") or "").strip()
+    first = hit.get("first_seen", None)
+    when = ""
+    host = ""
+    url = ""
+    if isinstance(first, dict):
+        when = _format_date(first.get("date", ""))
+        host = str(first.get("host") or "").strip()
+        url = first.get("url", "") or ""
+    elif first is not None:
+        when = _format_date(first)
+    if not verdict and not when and not host:
+        return ""
+    label = verdict or "Earlier check"
+    when_text = when or "date unknown"
+    host_html = f" {esc(host)}" if host else ""
+    link = f"<div>{anchor(url, 'Read the earlier check')}</div>" if safe_href(url) else ""
+    return (
+        "<section class='fl-seen fl-image-seen'>"
+        "<div class='fl-eyebrow'>— Seen before</div>"
+        f"<div><strong>{esc(label)}</strong>"
+        f" <span class='fl-muted'>{esc(when_text)}{esc(_distance_text(hit.get('distance', None)))}</span>"
+        f"{host_html}</div>"
+        f"{link}"
+        "</section>"
+    )
+
+
+def _is_image_model(model: dict) -> bool:
+    """True for an image submission, including one whose new fields arrived first.
+
+    input_type is the real signal. A card that already carries a path or
+    a provenance dict is treated as an image too, so a result written
+    before input_type was copied still shows the section. A text card
+    has none of these, so it stays a text card.
+    """
+    if str(model.get("input_type") or "").strip().lower() == "image":
+        return True
+    if str(model.get("image_path") or "").strip():
+        return True
+    for key in ("image_provenance", "image_consistency", "image_memory_hit"):
+        value = model.get(key)
+        if isinstance(value, dict) and value:
+            return True
+    return False
+
+
+def _empty_provenance_html(provenance: dict, dated: list, undated: list) -> str:
+    """A finished search with nothing to plot. A skipped search stays quiet.
+
+    no_key, the monthly cap, and an error already have a banner. Adding
+    'nothing found' under those would claim a search that did not happen.
+    """
+    if not isinstance(provenance, dict) or not provenance:
+        return ""
+    if vision_banner_text(provenance):
+        return ""
+    status = str(provenance.get("vision_status") or "").strip().lower()
+    if status not in _VISION_OK:
+        return ""
+    if dated or undated or isinstance(provenance.get("first_seen", None), dict):
+        return ""
+    return "<p class='fl-muted'>No earlier copies were found online.</p>"
+
+
+def image_check_html(model: dict) -> str:
+    """The image block. Empty for a text or link card.
+
+    Order is the reading order: what was uploaded, whether the caption
+    fits it, where the pixels were first seen, then the dated copies.
+    """
+    model = model if isinstance(model, dict) else {}
+    if not _is_image_model(model):
+        return ""
+    provenance = model.get("image_provenance", None)
+    if not isinstance(provenance, dict):
+        provenance = {}
+    consistency = model.get("image_consistency", None)
+    caption = str(model.get("caption") or "").strip()
+    if caption:
+        caption_html = f"<p class='fl-caption'>{esc(caption)}</p>"
+    else:
+        caption_html = "<p class='fl-caption fl-muted'>No caption supplied.</p>"
+    dated, undated = _split_matches(provenance.get("matches", None))
+    return "".join((
+        "<section class='fl-image'>",
+        eyebrow("Image check"),
+        vision_banner_html(provenance),
+        "<div class='fl-image-top'>",
+        "<div class='fl-thumb-col'>",
+        _thumb_html(model.get("image_path", "")),
+        _clue_html(consistency, provenance),
+        "</div>",
+        "<div class='fl-cap-col'>",
+        caption_html,
+        _consistency_html(consistency),
+        "</div>",
+        "</div>",
+        _first_seen_html(provenance),
+        _timeline_html(dated),
+        _undated_html(undated),
+        _empty_provenance_html(provenance, dated, undated),
+        _image_memory_html(model.get("image_memory_hit", None)),
+        "</section>",
+    ))
+
+
 def card_html(model: dict, *, cite_href=None, highlight: str = "") -> str:
-    """The static card: banner, verdict, leans, seen-before, evidence, correction.
+    """The static card: banner, verdict, image check, leans, seen-before, evidence, correction.
 
     Charts stay in the page. Everything that is a string from the claim
     is in this HTML, including the correction the card is willing to show.
+    The image block is empty unless this card is an image submission.
     """
     model = model or {}
     ids = [row.get("id") for row in model.get("evidence") or [] if isinstance(row, dict) and row.get("id")]
@@ -1270,7 +1935,9 @@ def card_html(model: dict, *, cite_href=None, highlight: str = "") -> str:
     return "".join((
         search_banner_html(model),
         verdict_html(model),
+        image_check_html(model),
         evidence_lean_html(model),
+        photo_lean_html(model),
         lean_html(model),
         seen_html(model),
         explanation_html(model.get("explanation", ""), ids, cite_href),
@@ -1346,6 +2013,7 @@ def queue_summary_html(row: dict, evidence_count) -> str:
         "alert_pending_approval": bool(row.get("alert_pending_approval", False)),
         "gate": row.get("gate", "") or "",
         "unverifiable_plain": plain_unverifiable(row.get("unverifiable_reason", "")),
+        "refute_kind": _refute_kind(row, {}),
     }
     count = "—"
     if evidence_count is not None:
