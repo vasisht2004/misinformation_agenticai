@@ -199,7 +199,32 @@ def _phrase(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def _provenance(state: dict, found: dict, *, id_start: int) -> tuple[dict, list]:
+def attach_cached_provenance(state: dict) -> dict:
+    """The photo's history when image memory reused the verdict.
+
+    Reuse skips investigate, which is the only box that used to call
+    Vision, so the card lost the timeline and the "online since" line.
+    The cache already holds the pages. Reading it does not spend a call.
+    A miss stays empty: this path must not open a socket to Vision.
+    Stance is not asked either. The verdict is the stored one, and a
+    new reading of the pages must not reopen it. Dates still come from
+    the page cache, and the date rule still labels a full match.
+    """
+    if str(state.get("input_type") or "") != "image":
+        return {}
+    path = str(state.get("image_path") or "").strip()
+    if not path:
+        return {}
+    found = detect(path, cache_only=True)
+    status = str(found.get("vision_status") or "cache_only_miss")
+    best_guess = [str(item) for item in (found.get("best_guess") or []) if str(item).strip()]
+    if status != "cached":
+        return {"image_provenance": _provenance_dict(status, [], None, best_guess)}
+    provenance, _evidence = _provenance(state, found, id_start=1, label_stance=False)
+    return {"image_provenance": provenance}
+
+
+def _provenance(state: dict, found: dict, *, id_start: int, label_stance: bool = True) -> tuple[dict, list]:
     status = str(found.get("vision_status") or "error")
     best_guess = [str(item) for item in (found.get("best_guess") or []) if str(item).strip()]
     if status not in {"ran", "cached"}:
@@ -209,7 +234,13 @@ def _provenance(state: dict, found: dict, *, id_start: int) -> tuple[dict, list]
     # An earlier trusted date is the refute. The stance call is not asked
     # about those pages: the model cannot talk a date forward.
     _mark_earlier(state, fetched)
-    labelled = _stance(state, fetched)
+    if label_stance:
+        labelled = _stance(state, fetched)
+    else:
+        for page in fetched:
+            page.setdefault("stance", "neutral")
+            page.setdefault("quote", "")
+        labelled = fetched
     matches, evidence = _rows(state, labelled, id_start=id_start)
     return _provenance_dict(status, matches, _first_seen(matches), best_guess), evidence
 
@@ -423,6 +454,11 @@ def _rows(state: dict, pages: list[dict], *, id_start: int) -> tuple[list, list]
             "date_source": page.get("date_source"),
         }
         matches.append(match)
+        # A partial or a page hit is a similar picture, or a page that
+        # contained one. It stays on the card. It is not the same file,
+        # so it is not a source the gate can cite.
+        if page["match"] != "full":
+            continue
         if page["stance"] not in {"supports", "refutes"}:
             continue
         evidence.append(
@@ -527,15 +563,16 @@ def date_is_trusted(source, value) -> bool:
 
 
 def is_dated_earlier(match: dict, event: date | None) -> bool:
-    """A full or partial file whose trusted day is before the event.
+    """A full match whose trusted day is before the event.
 
-    A "page" match only says the URL contained the picture somewhere.
-    It does not date the file. The margin is the same one the gate uses,
-    so a story that ran the day before the forward is still this event.
+    Partial and page hits are similar pictures, or a page that contained
+    one. They are not this file, so an old date on them does not refute
+    the caption. The margin is the same one the gate uses, so a story
+    that ran the day before the forward is still this event.
     """
     if event is None or not isinstance(match, dict):
         return False
-    if str(match.get("match") or "") not in {"full", "partial"}:
+    if str(match.get("match") or "") != "full":
         return False
     if not date_is_trusted(match.get("date_source"), match.get("date")):
         return False
@@ -569,15 +606,17 @@ def _mark_earlier(state: dict, pages: list[dict]) -> None:
 
 
 def _first_seen(matches: list[dict]) -> dict | None:
-    """Earliest trusted date among full and partial matches.
+    """Earliest trusted date among full matches.
 
-    A "page" match only says the file appeared on that URL. It is not
-    enough to date the photograph. A full or partial match is the file
-    itself, and the earliest such date is when we can first place it.
+    A partial match is a similar picture. A page match only says the
+    URL contained a picture. Neither dates this file. The earliest
+    trusted day on a full match is when we can first place it.
     """
     dated = []
     for match in matches:
-        if match.get("match") not in {"full", "partial"}:
+        if match.get("match") != "full":
+            continue
+        if not date_is_trusted(match.get("date_source"), match.get("date")):
             continue
         parsed = _iso(match.get("date"))
         if parsed is None:

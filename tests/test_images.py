@@ -1043,13 +1043,15 @@ def test_extract_date_is_the_event_and_claim_date_is_the_fallback(tmp_path, monk
     finally:
         clear_fake_llm()
     by_url = {row["url"]: row for row in found["image_provenance"]["matches"]}
-    # August is after the March event, so only the model is asked.
-    # January is before 10 March minus the margin, so the date rule labels it.
+    # August is a full match after the March event, so the model is asked.
+    # January is earlier, but it is only a partial, so the date rule
+    # does not label it and it is not evidence.
     assert calls["n"] == 1
     assert by_url["https://www.bbc.com/august"]["stance"] == "neutral"
-    assert by_url["https://www.reuters.com/january"]["quote"] == (
-        "Image on this page dated 2026-01-01, before the claimed event (2026-03-10)."
-    )
+    assert by_url["https://www.reuters.com/january"]["stance"] == "neutral"
+    assert "before the claimed event" not in by_url["https://www.reuters.com/january"]["quote"]
+    assert found["image_provenance"]["first_seen"]["date"] == "2026-08-01"
+    assert all(row["url"] != "https://www.reuters.com/january" for row in found["evidence"])
     # No extracted date: the caption's March day is ignored and claim_date
     # is the event, so the August page is now earlier too.
     clear_fake()
@@ -1270,12 +1272,229 @@ def test_photo_lean_line_is_on_every_image_card():
         },
     )
     card = render(state)["result"]
-    assert card["photo_lean"] == {"first_seen_year": 2019, "n_sites": 3, "n_dated_earlier": 2}
+    # The page match is not this file, so it is not one of the sites.
+    assert card["photo_lean"] == {
+        "first_seen_year": 2019,
+        "n_sites": 2,
+        "n_dated_earlier": 2,
+        "similar_since": None,
+    }
     html = card_html(view_model(result=card))
-    assert "This photo has been online since at least 2019 (3 sites)" in html
+    assert "This photo has been online since at least 2019 (2 sites)" in html
     decided = dict(card)
     decided["verdict"] = "Misleading"
-    assert "This photo has been online since at least 2019 (3 sites)" in card_html(view_model(result=decided))
+    assert "This photo has been online since at least 2019 (2 sites)" in card_html(view_model(result=decided))
     text = render({"input_type": "text", "claim": "India has 28 states.", "verdict": "Unverifiable"})["result"]
     assert text["photo_lean"] is None
     assert "online since" not in card_html(view_model(result=text))
+
+
+def test_cache_only_does_not_call_vision(tmp_path):
+    jpeg = _jpeg(tmp_path)
+    missed = detect(str(jpeg), cache_only=True)
+    assert missed["vision_status"] == "cache_only_miss"
+    assert missed["pages"] == []
+    assert calls_this_month() == 0
+
+
+def test_partial_from_2019_never_refutes_and_two_full_matches_do(tmp_path, monkeypatch):
+    jpeg = _jpeg(tmp_path)
+    set_fake(
+        lambda image: {
+            "best_guess": [],
+            "pages": [{"url": "https://www.bbc.com/old", "title": "Old", "match": "partial"}],
+        }
+    )
+
+    def _fetch(hit):
+        return Page(
+            url=hit.url,
+            title=hit.title,
+            text="A similar frame from an earlier flood.",
+            published_date="2019-08-01",
+            date_source="htmldate",
+            fetched=True,
+            fetch_status="ok",
+        )
+
+    monkeypatch.setattr("misinfo_agent.fetch.fetch_page", _fetch)
+
+    def _llm(prompt, schema, images):
+        if schema.__name__ == "ProvenanceBatch":
+            return {"judgements": [{"passage_id": "P1", "stance": "refutes", "quote": "earlier flood"}]}
+        return {"consistent": "unclear", "mismatches": [], "place_clues": [], "time_clues": []}
+
+    set_fake_llm(_llm)
+    try:
+        found = investigate_picture(
+            _claim(
+                "This photo shows the Chennai flood today.",
+                image_path=str(jpeg),
+                caption="Chennai flood today",
+                claim_date="2026-03-10",
+            )
+        )
+    finally:
+        clear_fake()
+        clear_fake_llm()
+    match = found["image_provenance"]["matches"][0]
+    # The model may call a lookalike a refute. It is still not this file,
+    # so it is not evidence and it does not date the photograph.
+    assert match["match"] == "partial"
+    assert found["evidence"] == []
+    assert found["image_provenance"]["first_seen"] is None
+    partial = _claim(
+        "This photo shows the Chennai flood today.",
+        image_provenance=found["image_provenance"],
+    )
+    judged = gate(partial)
+    assert judged["atomic_status"]["A1"] != "refuted"
+    assert "out of context" not in " ".join(judged["gate_reasons"]).casefold()
+
+    two = _claim(
+        "This photo shows the Chennai flood today.",
+        image_provenance={
+            "vision_status": "ran",
+            "best_guess": [],
+            "first_seen": {"date": "2019-08-01", "url": "https://a.example/a", "host": "a.example", "tier": 4},
+            "matches": [
+                _match(group_id="G1", url="https://a.example/a", host="a.example", date="2019-08-01"),
+                _match(group_id="G2", url="https://b.example/b", host="b.example", date="2019-05-01"),
+                _match(
+                    group_id="G3",
+                    url="https://c.example/c",
+                    host="c.example",
+                    match="partial",
+                    date="2018-01-01",
+                ),
+            ],
+        },
+    )
+    refuted = gate(two)
+    assert refuted["atomic_status"]["A1"] == "refuted"
+    assert "out of context" in " ".join(refuted["gate_reasons"]).casefold()
+
+
+def test_genuine_photo_with_only_partial_earlier_matches_is_not_out_of_context():
+    from app.components import card_html, view_model
+    from misinfo_agent.output import render
+
+    state = _claim(
+        "This photo shows the library opening on 10 March 2026.",
+        image_provenance={
+            "vision_status": "cached",
+            "best_guess": [],
+            "first_seen": None,
+            "matches": [
+                _match(
+                    group_id="G1",
+                    url="https://a.example/old",
+                    host="a.example",
+                    match="partial",
+                    date="2019-08-01",
+                    date_source="htmldate",
+                    stance="refutes",
+                ),
+                _match(
+                    group_id="G2",
+                    url="https://b.example/older",
+                    host="b.example",
+                    match="partial",
+                    date="2018-01-01",
+                    date_source="htmldate",
+                    stance="refutes",
+                ),
+            ],
+        },
+    )
+    judged = gate(state)
+    assert judged["atomic_status"]["A1"] != "refuted"
+    assert "out of context" not in " ".join(judged["gate_reasons"]).casefold()
+    card = render({**state, **judged})["result"]
+    assert card["photo_lean"]["first_seen_year"] is None
+    assert card["photo_lean"]["similar_since"] == 2018
+    assert card["photo_lean"]["n_dated_earlier"] == 0
+    html = card_html(view_model(result=card))
+    assert "Similar images seen online since 2018" in html
+    assert "This photo has been online since" not in html
+
+
+def test_reused_verdict_keeps_provenance_from_the_vision_cache(tmp_path, monkeypatch):
+    from misinfo_agent.graph import _prior
+    from misinfo_agent.output import photo_lean
+    from misinfo_agent.vision import _write_cache
+
+    monkeypatch.setattr(config, "IMAGE_MEMORY_DB", tmp_path / "image_memory.db")
+    _claim_encoder(monkeypatch)
+    jpeg = _jpeg(tmp_path)
+    digest = hashlib.sha256(jpeg.read_bytes()).hexdigest()
+    _write_cache(
+        digest,
+        {
+            "best_guess": [],
+            "pages": [{"url": "https://www.bbc.com/old", "title": "Old flood", "match": "full"}],
+        },
+    )
+
+    def _fetch(hit):
+        return Page(
+            url=hit.url,
+            title=hit.title,
+            text="The photograph is from the 2019 flood.",
+            published_date="2019-08-01",
+            date_source="htmldate",
+            fetched=True,
+            fetch_status="ok",
+        )
+
+    monkeypatch.setattr("misinfo_agent.fetch.fetch_page", _fetch)
+    monkeypatch.setattr(
+        "misinfo_agent.prior_match.decide_prior",
+        lambda *args, **kwargs: {
+            "route": "investigate",
+            "match_type": "none",
+            "best_match": {},
+            "match_reasons": [],
+        },
+    )
+    claim = "This photo shows the Chennai flood today."
+    phash, _near = _near_hashes()
+    _store_photo(phash, claim)
+    before = calls_this_month()
+    state = _claim(
+        claim,
+        image_path=str(jpeg),
+        image_phash=phash,
+        caption=claim,
+        claim_date="2026-03-10",
+    )
+    decision = _prior(state)
+    assert calls_this_month() == before
+    assert decision["route"] == "reuse_prior"
+    provenance = decision["image_provenance"]
+    assert provenance["vision_status"] == "cached"
+    assert provenance["first_seen"]["date"] == "2019-08-01"
+    assert provenance["matches"][0]["stance"] == "refutes"
+    lean = photo_lean({**state, **decision})
+    assert lean["first_seen_year"] == 2019
+    assert lean["n_dated_earlier"] == 1
+    assert "This photo has been online since at least 2019" in (
+        f"This photo has been online since at least {lean['first_seen_year']} ({lean['n_sites']} sites)"
+    )
+
+
+def test_run_images_uses_a_fresh_image_memory(monkeypatch):
+    import importlib.util
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("run_images_memory_under_test", root / "scripts" / "run_images.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["run_images_memory_under_test"] = module
+    spec.loader.exec_module(module)
+    real = config.DATA_DIR / "image_memory.db"
+    path = module.use_fresh_image_memory()
+    assert path != real
+    assert path == config.IMAGE_MEMORY_DB
+    assert path.name == "image_memory.db"
+    assert "image-memory-eval-" in str(path.parent)

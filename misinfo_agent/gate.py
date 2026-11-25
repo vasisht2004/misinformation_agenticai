@@ -586,6 +586,9 @@ def _photo_out_of_context(state: dict, aid: str) -> list[str] | None:
     no provenance group, at any tier, supports the caption. That path
     names the missing tier 1-2 page so the card can cap the confidence.
     A supporting page of any tier stops only this weaker path.
+
+    Only a full match is this file. A partial or a page hit is a similar
+    picture, and it does not vote on either rule or on True.
     """
     grouped = _photo_groups(state)
     if grouped is None:
@@ -639,7 +642,13 @@ def _photo_groups(state: dict) -> dict | None:
     raw = state.get("image_provenance")
     if not isinstance(raw, dict):
         return None
-    matches = [row for row in (raw.get("matches") or []) if isinstance(row, dict)]
+    # Partials stay on the card as similar images. They are not this
+    # file, so an old date or a refute stance on one cannot decide it.
+    matches = [
+        row
+        for row in (raw.get("matches") or [])
+        if isinstance(row, dict) and str(row.get("match") or "") == "full"
+    ]
     if not matches:
         return None
     claim_date = state.get("claim_date")

@@ -27,6 +27,7 @@ import csv
 import hashlib
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,26 @@ from misinfo_agent.vision import calls_this_month  # noqa: E402
 
 CSV_PATH = config.EVAL_DIR / "images_testset.csv"
 OUT_PATH = config.EVAL_DIR / "results_images.jsonl"
+
+
+# Kept alive for the process. A TemporaryDirectory that is not referenced
+# is deleted, and the run would then be writing into a missing file.
+_MEMORY_DIR: tempfile.TemporaryDirectory | None = None
+
+
+def use_fresh_image_memory() -> Path:
+    """A private image-memory DB for this process.
+
+    The real file is the product memory. An eval that read it would
+    repeat a verdict from an earlier test instead of checking the
+    photograph. One directory for the whole run, so a later row still
+    cannot see a verdict stored by a previous invocation.
+    """
+    global _MEMORY_DIR
+    _MEMORY_DIR = tempfile.TemporaryDirectory(prefix="image-memory-eval-")
+    path = Path(_MEMORY_DIR.name) / "image_memory.db"
+    config.IMAGE_MEMORY_DB = path
+    return path
 
 
 def apply_mode(sites: str) -> None:
@@ -349,6 +370,7 @@ def _print_detail(state: dict) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
+    use_fresh_image_memory()
     apply_run_options(no_text_search=args.no_text_search)
     if not CSV_PATH.is_file():
         raise SystemExit(f"missing {CSV_PATH}")

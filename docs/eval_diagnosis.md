@@ -625,3 +625,37 @@ Before is the published blocked card. After is the new code on the stored eviden
 
 - **4b035555fded, 3-class only.** Gold Misleading. Claim: users will be charged a fee for UPI transactions over ₹2,000. Before: Unverifiable. After: False. assess_v2 said `entirely_false` because the finance ministry called that report false. 2-class is correct. No new 2-class wrong was added on this set. The one remaining 2-class wrong, 0ab825964c1e (gold Misleading, predicted True), was already wrong on the published card.
 
+## IMAGE SET (blocked, provenance only)
+
+Rules adjusted after a first run on these same images (post-hoc). The first run dated partial matches and let them refute. This run dates full matches only. A partial stays on the card as a similar image. It is not evidence, it does not set first_seen, and it does not vote.
+
+`scripts/run_images.py` on all 16 rows, `--sites blocked --no-text-search`, with a fresh image-memory database so no row reused an earlier verdict. Tavily stayed at 895. Vision stayed at 17: every image was a cache hit, so this run made no live Vision call.
+
+2-class treats True as true and both False and Misleading as not-true. Unverifiable is abstained. first_seen is the earliest trusted date on a full match. n_dated_earlier counts full matches dated before the claimed event.
+
+| | decided | correct 2c | wrong 2c | abstained |
+| --- | --- | --- | --- | --- |
+| before (partials could date and refute) | 10 | 8 | 2 | 6 |
+| after (full matches only) | 0 | 0 | 0 | 16 |
+
+| image | label | before | after | refute_kind | first_seen | n_full | n_partial | n_dated_earlier |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| img01 | Misleading | Unverifiable | Unverifiable |  |  | 0 | 12 | 0 |
+| img02 | False | Misleading | Unverifiable |  |  | 0 | 0 | 0 |
+| img03 | False | Misleading | Unverifiable |  |  | 0 | 7 | 0 |
+| img04 | True | Unverifiable | Unverifiable |  |  | 4 | 0 | 0 |
+| img05 | True | Misleading | Unverifiable |  |  | 0 | 6 | 0 |
+| img06 | True | Unverifiable | Unverifiable |  |  | 2 | 2 | 0 |
+| img07 | True | Misleading | Unverifiable |  |  | 5 | 0 | 0 |
+| img08 | False | Misleading | Unverifiable |  |  | 0 | 9 | 0 |
+| img09 | Misleading | Misleading | Unverifiable |  |  | 0 | 11 | 0 |
+| img10 | False | Misleading | Unverifiable |  |  | 0 | 2 | 0 |
+| img11 | Misleading | Misleading | Unverifiable |  |  | 0 | 12 | 0 |
+| img12 | False | Unverifiable | Unverifiable |  |  | 0 | 4 | 0 |
+| img13 | False | Misleading | Unverifiable |  |  | 0 | 12 | 0 |
+| img14 | Misleading | Unverifiable | Unverifiable |  |  | 0 | 8 | 0 |
+| img15 | Misleading | Misleading | Unverifiable |  |  | 0 | 12 | 0 |
+| img16 | Misleading | Unverifiable | Unverifiable |  |  | 0 | 3 | 0 |
+
+No full match had a trusted date, so first_seen is empty on every row and nothing was dated earlier. img04, img06, and img07 do have full matches (4, 2, and 5); those pages had no trusted day. The earlier Misleading decisions were partials. img02's twelve pages are page-level hits, not partials. Where a partial did have a trusted year, the card can say "Similar images seen online since" that year: img01 2015, img05 2026, img08 2026, img09 2026, img10 2025, img11 2026, img13 2026, img15 2017.
+

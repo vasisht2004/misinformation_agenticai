@@ -136,15 +136,18 @@ def _card(state: dict, report: dict | None = None) -> dict:
 def photo_lean(state: dict) -> dict | None:
     """How long this photograph has been online, from provenance only.
 
-    first_seen_year is the earliest trusted full or partial match.
-    n_sites is distinct registrable domains, so www and a subdomain are
-    one site. n_dated_earlier counts full or partial matches whose trusted
-    day is before the claimed event, which is the date rule's own test.
-    A text claim has no photograph, so the card field stays empty.
+    first_seen_year is the earliest trusted full match. n_sites is
+    distinct registrable domains among those full matches, so www and a
+    subdomain are one site. n_dated_earlier counts full matches whose
+    trusted day is before the claimed event, which is the date rule's
+    own test. A partial is a similar picture: when no full match has a
+    trusted day, similar_since is the earliest partial year and the card
+    says "Similar images seen online since". A text claim has no
+    photograph, so the card field stays empty.
     """
     if str(state.get("input_type") or "") != "image":
         return None
-    from misinfo_agent.provenance import claim_event_date, is_dated_earlier
+    from misinfo_agent.provenance import claim_event_date, date_is_trusted, is_dated_earlier
     from misinfo_agent.search import registrable_domain, site_host
 
     raw = state.get("image_provenance")
@@ -154,7 +157,17 @@ def photo_lean(state: dict) -> dict | None:
     event = claim_event_date(state)
     sites = set()
     earlier = 0
+    partial_years = []
     for match in matches:
+        kind = str(match.get("match") or "")
+        if kind == "partial":
+            if date_is_trusted(match.get("date_source"), match.get("date")):
+                year = _year(match.get("date"))
+                if year is not None:
+                    partial_years.append(year)
+            continue
+        if kind != "full":
+            continue
         host = str(match.get("host") or site_host(str(match.get("url") or "")) or "").strip()
         domain = registrable_domain(host) if host else ""
         if domain:
@@ -162,10 +175,14 @@ def photo_lean(state: dict) -> dict | None:
         if is_dated_earlier(match, event):
             earlier += 1
     year = _year(seen.get("date"))
+    # Only when this file itself has no trusted day. A full match already
+    # tells the reader when the photograph was online.
+    similar = min(partial_years) if year is None and partial_years else None
     return {
         "first_seen_year": year,
         "n_sites": len(sites),
         "n_dated_earlier": earlier,
+        "similar_since": similar,
     }
 
 

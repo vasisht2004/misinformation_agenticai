@@ -71,14 +71,18 @@ def clear_fake() -> None:
     _FAKE = None
 
 
-def detect(image_path: str) -> dict:
+def detect(image_path: str, *, cache_only: bool = False) -> dict:
     """WEB_DETECTION for the JPEG at image_path.
 
     Always returns a dict. vision_status is ran, cached, monthly_cap,
-    no_key, error, or not_image. A missing key and a full month are
-    statuses, not exceptions: the rest of the claim still runs.
-    pages are {url, title, match} with match full, partial, or page.
+    no_key, error, not_image, or cache_only_miss. A missing key and a
+    full month are statuses, not exceptions: the rest of the claim still
+    runs. pages are {url, title, match} with match full, partial, or page.
     best_guess is the bestGuessLabels only.
+
+    cache_only is the reuse path. The verdict is already decided, and the
+    card only needs the pages we have already paid for. A miss returns
+    cache_only_miss and does not open a socket or move the counter.
     """
     data = _read_jpeg(image_path)
     if data is None:
@@ -89,6 +93,8 @@ def detect(image_path: str) -> dict:
         # Already paid for. Reading it must not move the monthly counter.
         cached["vision_status"] = "cached"
         return cached
+    if cache_only:
+        return _empty("cache_only_miss")
     if _FAKE is not None:
         parsed = _from_any(_FAKE(data))
         if parsed is None:

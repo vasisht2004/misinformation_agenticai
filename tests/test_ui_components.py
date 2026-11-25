@@ -334,9 +334,10 @@ def _card(name: str) -> str:
 
 def _timeline(html: str) -> str:
     chunk = html.split("<div class='fl-timeline'>", 1)[1]
-    # Undated rows sit in the same section, under the dated line.
-    if "<div class='fl-undated'>" in chunk:
-        chunk = chunk.split("<div class='fl-undated'>", 1)[0]
+    # Undated rows and similar images sit under the dated line.
+    for marker in ("<div class='fl-undated'>", "<section class='fl-similar'>"):
+        if marker in chunk:
+            chunk = chunk.split(marker, 1)[0]
     return chunk
 
 
@@ -382,13 +383,19 @@ def test_image_out_of_context_card():
     assert "https://hillwire.example/2019/03/snow-on-the-ridge" in html
     assert 'rel="noopener noreferrer"' in html
     timeline = _timeline(html)
-    assert timeline.index("12 Mar 2019") < timeline.index("2 Nov 2024") < timeline.index("12 Nov 2026")
+    assert "12 Mar 2019" in timeline
+    assert "2 Nov 2024" not in timeline
+    assert "12 Nov 2026" not in timeline
     assert timeline.count("is-first") == 1
     assert "fl-tl-point is-neutral is-first" in timeline
-    assert "is-refutes" in timeline
-    assert "is-supports" in timeline
     assert "Full match" in timeline
-    assert "Partial match" in timeline
+    assert "Partial match" not in timeline
+    similar = html.split("<section class='fl-similar'>", 1)[1]
+    assert "Similar images" in similar
+    assert similar.index("2 Nov 2024") < similar.index("12 Nov 2026")
+    assert "is-refutes" in similar
+    assert "is-supports" in similar
+    assert "Partial match" in similar
     assert "fl-undated" in html
     assert "bad.example" in html
     assert "<script>" not in html

@@ -1072,12 +1072,18 @@ def photo_lean_html(model: dict) -> str:
         return ""
     year = lean.get("first_seen_year")
     if year is None or year == "":
-        return ""
-    try:
-        count = int(lean.get("n_sites") or 0)
-    except (TypeError, ValueError):
-        count = 0
-    line = f"This photo has been online since at least {year} ({count} sites)"
+        # No full match dated this file. The partials are lookalikes,
+        # and the line has to say so instead of dating the photograph.
+        similar = lean.get("similar_since")
+        if similar is None or similar == "":
+            return ""
+        line = f"Similar images seen online since {similar}"
+    else:
+        try:
+            count = int(lean.get("n_sites") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        line = f"This photo has been online since at least {year} ({count} sites)"
     return (
         "<aside class='fl-src-lean'>"
         f"<strong>{esc(line)}</strong>"
@@ -1706,6 +1712,43 @@ def _match_body_html(row: dict, *, visible: bool) -> str:
     return "".join(bits)
 
 
+def _split_same_and_similar(matches) -> tuple[list[dict], list[dict]]:
+    """Full matches are this file. Partials are similar images.
+
+    A page hit only says the URL contained a picture. It is not this
+    file either, so it sits with the similar images and cannot become
+    the first-seen date.
+    """
+    if not isinstance(matches, (list, tuple)):
+        return [], []
+    same = []
+    similar = []
+    for item in matches:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("match") or "").strip().lower() == "full":
+            same.append(item)
+        else:
+            similar.append(item)
+    return same, similar
+
+
+def _similar_html(rows: list[dict]) -> str:
+    """Lookalikes. Not the timeline of this file."""
+    if not rows:
+        return ""
+    dated, undated = _split_matches(rows)
+    body = _timeline_html(dated) + _undated_html(undated)
+    if not body:
+        return ""
+    return (
+        "<section class='fl-similar'>"
+        "<p class='fl-muted'>Similar images</p>"
+        f"{body}"
+        "</section>"
+    )
+
+
 def _split_matches(matches) -> tuple[list[dict], list[dict]]:
     if not isinstance(matches, (list, tuple)):
         return [], []
@@ -1896,7 +1939,8 @@ def image_check_html(model: dict) -> str:
         caption_html = f"<p class='fl-caption'>{esc(caption)}</p>"
     else:
         caption_html = "<p class='fl-caption fl-muted'>No caption supplied.</p>"
-    dated, undated = _split_matches(provenance.get("matches", None))
+    full, similar = _split_same_and_similar(provenance.get("matches", None))
+    dated, undated = _split_matches(full)
     return "".join((
         "<section class='fl-image'>",
         eyebrow("Image check"),
@@ -1914,7 +1958,8 @@ def image_check_html(model: dict) -> str:
         _first_seen_html(provenance),
         _timeline_html(dated),
         _undated_html(undated),
-        _empty_provenance_html(provenance, dated, undated),
+        _similar_html(similar),
+        _empty_provenance_html(provenance, dated, undated or similar),
         _image_memory_html(model.get("image_memory_hit", None)),
         "</section>",
     ))

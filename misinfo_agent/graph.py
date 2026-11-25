@@ -318,8 +318,14 @@ def _prior(state: dict) -> dict:
     if decision.get("best_match") is None:
         decision["best_match"] = {}
     from misinfo_agent.image_memory import apply_image_reuse
+    from misinfo_agent.provenance import attach_cached_provenance
 
-    return apply_image_reuse(state, decision)
+    decision = apply_image_reuse(state, decision)
+    # The reused verdict skips investigate. The timeline still has to
+    # come from the Vision cache, or the card drops "online since".
+    if decision.get("route") == "reuse_prior" and str(state.get("input_type") or "") == "image":
+        decision.update(attach_cached_provenance(state))
+    return decision
 
 
 def _investigate(state: dict) -> dict:
