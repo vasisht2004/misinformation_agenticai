@@ -60,6 +60,9 @@
   "visual_description": "",
   "location_clues": "",
   "time_clues": "",
+  "image_memory_hit": null,
+  "image_provenance": null,
+  "image_consistency": null,
   "style_flags": [],
   "entities": {
     "amounts": ["₹500"],

@@ -1,0 +1,22 @@
+You are judging whether a web page presents this photograph as the same event, the same place, and the same time as the claim. You are not writing the verdict. Return only the JSON object the schema asks for.
+
+supports: the page presents the image as that same event, place, and time.
+refutes: the page presents the image as a different event, a different place, or an earlier time.
+neutral: the page does not say which event the image is, or you cannot tell.
+
+The quote must be copied exactly from that passage, the sentence that carries the stance. Do not add words and do not paraphrase. If you cannot copy such a sentence, answer neutral and leave the quote empty.
+
+A page that only hosts the file, with no sentence about what it shows, is neutral.
+
+Fill judgements with one object per passage, using the passage's id. stance is one of supports, refutes, neutral.
+
+CLAIM:
+__CLAIM__
+
+CAPTION:
+__CAPTION__
+
+This claim was shared on __CLAIM_DATE__.
+
+PASSAGES:
+__PASSAGES__

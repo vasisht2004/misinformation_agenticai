@@ -22,7 +22,7 @@ system failure. It is never reported as "not enough sources".
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import misinfo_agent.config as config
@@ -30,6 +30,12 @@ import misinfo_agent.config as config
 # The sentence the card must show when text would otherwise "confirm" a
 # picture. Kept as one string so the test and the UI cannot drift.
 _PICTURE_BLOCK = "Text sources cannot confirm what a picture shows."
+
+# The sentence assess looks for when it forces refute_kind out_of_context.
+# The wording is the product's, so the card and the kind cannot drift.
+PHOTO_OUT_OF_CONTEXT = (
+    "The photo is from a different event or an earlier time, so the caption is out of context."
+)
 
 # Credible means an editor or an office, not a blog. Tier 3 is a real
 # organisation and still not this bar: the rule asks for tier 1 or 2.
@@ -312,6 +318,11 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
             reasons.insert(1, config.WEAK_REFUTE_CAVEAT)
             return "refuted", reasons, detail_ids
 
+    if _picture(state, text) and config.GATE_PHOTO_CONTEXT:
+        photo_lines = _photo_out_of_context(state, aid)
+        if photo_lines:
+            return "refuted", photo_lines + reasons, detail_ids
+
     picture = _picture(state, text)
     # The core needs two tier 1-2 supporters. A side claim, and the core
     # when the flag is off, still accepts one credible group plus any
@@ -373,6 +384,12 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
             )
             return "supported", reasons, detail_ids
 
+    if picture and config.GATE_PHOTO_SUPPORT:
+        photo_lines = _photo_supported(state, aid)
+        if photo_lines:
+            # Two full matches of the same event. Text still cannot do this.
+            return "supported", photo_lines + reasons, detail_ids
+
     picture_support = (
         len(support_c) >= 2
         if strict_support
@@ -416,6 +433,12 @@ def _rows(evidence, atomic_id: str, *, drop_after: bool) -> list[dict]:
         if drop_after and row.get("after_claim") is True:
             continue
         if row.get("stance") not in {"supports", "refutes"}:
+            continue
+        # Provenance rows are judged by the photo rules, which read
+        # image_provenance. Counting them here would let a reverse-image
+        # page confirm a picture through the text rule, or refute it as
+        # an ordinary false claim instead of out of context.
+        if row.get("provenance") is True:
             continue
         kept.append(row)
     return kept
@@ -550,6 +573,154 @@ def _picture(state: dict, atomic_text: str) -> bool:
     if _claim_is_picture(atomic_text, None):
         return True
     return _claim_is_picture(str(state.get("claim") or ""), None)
+
+
+def _photo_out_of_context(state: dict, aid: str) -> list[str] | None:
+    """Refuted as out of context, or None when the photo rule does not fire.
+
+    The tier 1-2 rule is unchanged: one such group must place the file at
+    an earlier event or a different place, and no tier 1-2 page may
+    present it as this event. One lower-tier page is not enough.
+
+    With GATE_PHOTO_WEAK_REFUTE, two groups of any tier also refute when
+    no provenance group, at any tier, supports the caption. That path
+    names the missing tier 1-2 page so the card can cap the confidence.
+    A supporting page of any tier stops only this weaker path.
+    """
+    grouped = _photo_groups(state)
+    if grouped is None:
+        return None
+    refute = [name for name, item in grouped.items() if item["refutes"] and not item["blocks"]]
+    blocks = [name for name, item in grouped.items() if item["blocks"]]
+    if blocks:
+        return None
+    credible = [name for name in refute if grouped[name]["tier"] <= _CREDIBLE_TIER]
+    if credible:
+        detail = (
+            f"{aid} is refuted: {len(credible)} tier 1 or 2 provenance "
+            f"{'group shows' if len(credible) == 1 else 'groups show'} an earlier or different event."
+        )
+        return [PHOTO_OUT_OF_CONTEXT, detail]
+    supports = [name for name, item in grouped.items() if item["supports"]]
+    if config.GATE_PHOTO_WEAK_REFUTE and len(refute) >= 2 and not supports:
+        detail = (
+            f"{aid} is refuted: {len(refute)} independent provenance groups "
+            "show an earlier or different event."
+        )
+        return [PHOTO_OUT_OF_CONTEXT, detail, config.PHOTO_WEAK_REFUTE_CAVEAT]
+    return None
+
+
+def _photo_supported(state: dict, aid: str) -> list[str] | None:
+    """True only from two independent full tier 1-2 matches of this event.
+
+    A partial match, a tier 3 or 4 page, or a single newsroom is not
+    enough. Otherwise a photograph is never True from provenance, and
+    the text rule below still cannot confirm it.
+    """
+    grouped = _photo_groups(state)
+    if grouped is None:
+        return None
+    # A tier 1-2 page that places the file at another event blocks True.
+    # Two agreeing newsrooms do not outvote that page.
+    if any(item["refutes"] and item["tier"] <= _CREDIBLE_TIER for item in grouped.values()):
+        return None
+    full = [name for name, item in grouped.items() if item["full_support"] and not item["refutes"]]
+    if len(full) < 2:
+        return None
+    return [
+        f"{aid} is supported: {len(full)} independent tier 1 or 2 groups "
+        "have a full match of this photograph from the same event."
+    ]
+
+
+def _photo_groups(state: dict) -> dict | None:
+    """One vote per provenance group. None when there is no photo table."""
+    raw = state.get("image_provenance")
+    if not isinstance(raw, dict):
+        return None
+    matches = [row for row in (raw.get("matches") or []) if isinstance(row, dict)]
+    if not matches:
+        return None
+    claim_date = state.get("claim_date")
+    buckets: dict[str, dict] = {}
+    for index, match in enumerate(matches):
+        name = str(match.get("group_id") or "").strip() or f"row:{index}"
+        item = buckets.setdefault(
+            name,
+            {
+                "refutes": False,
+                "blocks": False,
+                "supports": False,
+                "full_support": False,
+                "tier": 4,
+            },
+        )
+        tier = _tier(match)
+        item["tier"] = min(item["tier"], tier)
+        early = _photo_earlier(match.get("date"), claim_date)
+        stance = match.get("stance")
+        # An earlier date is a different time even when the model said
+        # the page agrees. The date is the part a caption cannot talk past.
+        if early or stance == "refutes":
+            item["refutes"] = True
+        # Any tier. The weak photo rule needs to know that somebody,
+        # including a blog, presented the file as this event. The tier
+        # 1-2 block below is the older rule and is not this flag.
+        if stance == "supports" and not early:
+            item["supports"] = True
+        if (
+            stance == "supports"
+            and not early
+            and tier <= _CREDIBLE_TIER
+        ):
+            item["blocks"] = True
+        if (
+            stance == "supports"
+            and match.get("match") == "full"
+            and not early
+            and tier <= _CREDIBLE_TIER
+            and _photo_on_event(match.get("date"), claim_date)
+        ):
+            item["full_support"] = True
+    return buckets
+
+
+def _photo_earlier(page_date, claim_date) -> bool:
+    """True when the page is older than claim_date minus the margin."""
+    page = _photo_day(page_date)
+    claim = _photo_day(claim_date)
+    if page is None or claim is None:
+        return False
+    return page < claim - timedelta(days=config.PHOTO_EARLIER_DAYS)
+
+
+def _photo_on_event(page_date, claim_date) -> bool:
+    """Dated on or after the event, allowing the same margin before the forward.
+
+    A story often runs a day or two before the forward. Older than that
+    margin is an earlier event, which is the refute side of this rule.
+    A missing date is not "on or after": True requires a date.
+    """
+    page = _photo_day(page_date)
+    claim = _photo_day(claim_date)
+    if page is None or claim is None:
+        return False
+    return page >= claim - timedelta(days=config.PHOTO_EARLIER_DAYS)
+
+
+def _photo_day(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def _overall(state: dict, core_id: str, core_status: str) -> tuple[str, str, int | None]:

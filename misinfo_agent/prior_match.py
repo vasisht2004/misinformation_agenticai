@@ -71,9 +71,9 @@ _NOT_A_SUBJECT = frozenset(
     }
 )
 
-# There is no image memory yet, so a text hit cannot prove two pictures are
-# the same file. "video … shows" and "photo of" are the claim talking about
-# a picture. An old flood photo must not be reused for a new flood.
+# There is no text hash that can prove two pictures are the same file.
+# Image memory does that for a photograph. A text hit is still capped
+# at similar, because the words of an old flood are not this file.
 _PICTURE_CLAIM = re.compile(
     r"\b(photo|image|picture|video|clip|footage)\b.*\b(shows?|of)\b",
     re.IGNORECASE,

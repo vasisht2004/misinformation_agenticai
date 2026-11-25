@@ -83,7 +83,30 @@ def _offline_llm(request, monkeypatch, tmp_path):
         raise RuntimeError("offline test tried to fetch a page")
 
     monkeypatch.setattr("misinfo_agent.fetch._http_get", _refuse_fetch)
+    # Vision is the third gateway. A key in .env must not turn pytest
+    # into a web-detection session, and the monthly file is the real bill.
+    monkeypatch.delenv("GOOGLE_VISION_API_KEY", raising=False)
+    monkeypatch.setattr("misinfo_agent.vision._load_env", lambda: None)
+
+    def _refuse_vision(*args, **kwargs):
+        raise RuntimeError("offline test tried to call Vision")
+
+    monkeypatch.setattr("misinfo_agent.vision._post", _refuse_vision)
+    monkeypatch.setattr("misinfo_agent.config.VISION_CACHE", True)
+    monkeypatch.setattr("misinfo_agent.config.VISION_CACHE_DIR", tmp_path / "vision")
+    monkeypatch.setattr(
+        "misinfo_agent.vision.MONTHLY_COUNT_PATH",
+        tmp_path / "vision_monthly_count.json",
+    )
+    monkeypatch.setattr(
+        "misinfo_agent.config.IMAGE_MEMORY_DB",
+        tmp_path / "image_memory.db",
+    )
+    from misinfo_agent.vision import clear_fake
+
+    clear_fake()
     yield
     clear_fake_search()
     reset_claim_searches()
     reset_search_usage()
+    clear_fake()

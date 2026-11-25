@@ -24,7 +24,7 @@ import re
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Literal
 from urllib.parse import urljoin, urlsplit
 
@@ -94,6 +94,14 @@ _MONTH_NUMBER = {
 }
 _MDY = r"([A-Za-z]{3,9}\.?)\s+(\d{1,2}),?\s+(\d{4})"
 _ISO_DATE = r"(\d{4})-(\d{2})-(\d{2})"
+# A LinkedIn activity or share id is 19 digits. The snowflake's time is
+# the leading 41 bits. Matching a longer run would cut a 20-digit id
+# down to a different number.
+_LINKEDIN_ID = re.compile(r"(?<!\d)(\d{19})(?!\d)")
+# LinkedIn launched in 2003. An id that decodes earlier is not a post
+# clock, and a day after today has not been published yet.
+_LINKEDIN_EPOCH = date(2003, 1, 1)
+
 # "Published On Jul 15, 2025" and "This Article is From Jul 15, 2025".
 # "published from a syndicated feed" does not match: no date follows.
 _PUBLISHED_LINE = re.compile(
@@ -111,7 +119,9 @@ _BYLINE_LINE = re.compile(
 # "text" is a publication line in the article we already have. Used when
 # the host refuses the date-only fetch (moneycontrol and ndtv return 403)
 # and the page cache was stored from Tavily text with no HTML date.
-_DateSource = Literal["htmldate", "url", "trafilatura", "tavily", "untrusted", "page", "text"]
+_DateSource = Literal[
+    "htmldate", "url", "trafilatura", "tavily", "untrusted", "page", "text", "linkedin_id",
+]
 _Status = Literal["ok", "failed", "snippet", "circulation", "non_english"]
 _BodyFrom = Literal["http", "pdf", "tavily", "snippet", "none"]
 
@@ -541,12 +551,21 @@ def _resolve_date(html, url: str, meta_date, tavily_date):
     if html:
         clues.append(("htmldate", _htmldate(html)))
     clues.append(("url", _url_date(url)))
+    # The activity id is the post's own clock. The page is not opened:
+    # a social host is circulation, and this date is the reason we can
+    # still place the photograph.
+    clues.append(("linkedin_id", linkedin_post_date(url)))
     clues.append(("trafilatura", _date_text(meta_date)))
     clues.append(("tavily", _date_text(tavily_date)))
     for source, raw in clues:
         parsed = _parse_date(raw)
         if parsed is None:
             continue
+        # Today is a "last updated" stamp on a ministry page. A LinkedIn
+        # id that decodes to today is the post's creation time, and the
+        # decoder already rejected anything after today.
+        if source == "linkedin_id":
+            return parsed.isoformat(), source
         if parsed >= today:
             saw_untrusted = True
             continue
@@ -571,6 +590,47 @@ def _htmldate(html: str) -> str | None:
         verbose=False,
     )
     return _date_text(found)
+
+
+def linkedin_post_date(url: str) -> str | None:
+    """The day a LinkedIn activity or share id was created. No request.
+
+    The id is a 64-bit snowflake. Its timestamp is the leading 41 bits,
+    in milliseconds. A 19-digit id fits in 63 bits (the high bit of the
+    word is unused), so those 41 bits sit at a shift of 22. Shifting a
+    zero-padded 64-bit word by 23 would count that leading zero as time
+    and date every current post to the 1990s, which the window below
+    would then throw away. A company page that happens to contain 19
+    digits is not a post, so the path has to be an activity, a share,
+    or /posts/.
+    """
+    text = str(url or "")
+    host = registrable_domain(site_host(text) or "")
+    if host != "linkedin.com":
+        return None
+    folded = text.casefold()
+    if "activity" not in folded and "share" not in folded and "/posts/" not in folded:
+        return None
+    match = _LINKEDIN_ID.search(text)
+    if match is None:
+        return None
+    return _linkedin_id_day(int(match.group(1)))
+
+
+def _linkedin_id_day(activity_id: int) -> str | None:
+    if activity_id < 0 or activity_id.bit_length() > 64:
+        return None
+    # 64 significant bits means the high bit is set and the timestamp
+    # starts one bit higher. Every 19-digit id we have seen is 63 bits.
+    shift = 23 if activity_id.bit_length() == 64 else 22
+    millis = activity_id >> shift
+    try:
+        when = datetime.fromtimestamp(millis / 1000, tz=timezone.utc).date()
+    except (OverflowError, OSError, ValueError):
+        return None
+    if when < _LINKEDIN_EPOCH or when > date.today():
+        return None
+    return when.isoformat()
 
 
 def _url_date(url: str) -> str | None:

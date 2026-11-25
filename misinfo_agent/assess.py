@@ -28,7 +28,13 @@ from pydantic import BaseModel, Field, field_validator
 
 import misinfo_agent.config as config
 from misinfo_agent import gate as gate_box
+from misinfo_agent.gate import PHOTO_OUT_OF_CONTEXT
 from misinfo_agent.llm import LLMError, LLMQuotaError, call_structured
+
+# The sentence a "no" on the photograph adds. The card and the tests
+# share it so a reworded caveat cannot pass one and fail the other.
+CAPTION_MISMATCH = "The photo's details may not match the caption"
+CAPTION_MISMATCH_FLAG = "Image-caption mismatch"
 
 # The archive stores capitalised labels, and the sample fixture stores
 # them in lower case. Both have to land on the same five words the card
@@ -46,7 +52,7 @@ _FROM_ARCHIVE = {
 # date_source values fetch.py keeps when a publication day survived.
 # "untrusted" is the opposite: the only dates on the page were today or
 # in the future, so that row does not count as dated.
-_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text"}
+_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text", "linkedin_id"}
 
 _CITE = re.compile(r"\[(E\d+)\]")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
@@ -180,6 +186,11 @@ def assess(state: dict) -> dict:
     # call refuted, that field is the model picking a verdict the table
     # does not support, so it is dropped before the rule reads it.
     kinds = _kinds_for_refuted(state, kinds)
+    # The photo rule already refuted the core. The model's kind would
+    # otherwise call that entirely_false and the verdict would be False.
+    # Out of context is Misleading: the event may be real, the caption is not.
+    if _photo_context(state):
+        kinds[_core_id(state)] = "out_of_context"
     true_version = _guard_claim_text(
         draft.true_version if draft is not None else "",
         evidence,
@@ -203,14 +214,19 @@ def assess(state: dict) -> dict:
     confidence = _confidence(state, verdict, core, _core_status(state))
     # A weak refute is real evidence and not a tier 1-2 record. The cap
     # is the ceiling for that path even when the logistic would sit higher.
+    # The photo path has its own sentence: a tier 1-2 provenance refute
+    # does not wear it, and is not capped.
     if _weak_caveat(state) and verdict in {"False", "Misleading"}:
         confidence = min(confidence, float(config.WEAK_REFUTE_CONFIDENCE_CAP))
+    if _photo_weak_caveat(state) and verdict in {"False", "Misleading"}:
+        confidence = min(confidence, float(config.PHOTO_WEAK_REFUTE_CONFIDENCE_CAP))
     citations = _citations(explanations, true_version, what_we_found)
     # Set on every Unverifiable, including a thin table. A conflict still
     # has verdict None here; the non-blocking review turns that into
     # Unverifiable and writes its own reason. Blocking mode keeps None.
     reason = gate_box.unverifiable_reason(state) if verdict == "Unverifiable" else ""
-    return _pack(
+    caveats, needs_human, extra_flags = _caption_effects(state, caveats, needs_human)
+    packed = _pack(
         verdict=verdict,
         confidence=confidence,
         explanation=explanations.get(core, ""),
@@ -232,6 +248,9 @@ def assess(state: dict) -> dict:
         needs_human=needs_human,
         unverifiable_reason=reason,
     )
+    if extra_flags is not None:
+        packed["red_flags"] = extra_flags
+    return packed
 
 
 def _verdict(state: dict, kinds: dict[str, str | None], notes: list[str]) -> tuple:
@@ -250,7 +269,7 @@ def _verdict(state: dict, kinds: dict[str, str | None], notes: list[str]) -> tup
     core = _core_id(state)
     core_status = _core_status(state)
     kind = kinds.get(core)
-    weak = _weak_caveat(state)
+    weak = _weak_caveat(state) + _photo_weak_caveat(state)
     # entirely_false: the event did not happen. single_fact_wrong: the
     # claim's main assertion is one date, number, or name, and it is
     # wrong. Both are False. A side detail, an outdated fact, a partial
@@ -630,6 +649,31 @@ def _kinds_for_refuted(state: dict, kinds: dict[str, str | None]) -> dict[str, s
     }
 
 
+def _photo_context(state: dict) -> bool:
+    """True when the photo rule, not the model, refuted the core."""
+    if _core_status(state) != "refuted":
+        return False
+    return any(PHOTO_OUT_OF_CONTEXT in str(line) for line in (state.get("gate_reasons") or []))
+
+
+def _caption_effects(state: dict, caveats: list, needs_human: bool) -> tuple[list, bool, list | None]:
+    """A caption mismatch is a caveat and a review, never a verdict.
+
+    The verdict argument is whatever the evidence rule already chose.
+    This only adds the sentence, the red flag, and pending review.
+    """
+    raw = state.get("image_consistency")
+    if not isinstance(raw, dict) or raw.get("consistent") != "no":
+        return caveats, needs_human, None
+    updated = list(caveats)
+    if CAPTION_MISMATCH not in updated:
+        updated.append(CAPTION_MISMATCH)
+    flags = [str(item) for item in (state.get("red_flags") or [])]
+    if CAPTION_MISMATCH_FLAG not in flags:
+        flags.append(CAPTION_MISMATCH_FLAG)
+    return updated, True, flags
+
+
 def _settle_text(
     verdict: str | None,
     true_version: str,
@@ -732,6 +776,9 @@ def _from_archive(state: dict, notes: list[str]) -> dict:
     explanation = _cite_archive(_trim(explanation, 59, notes, "explanation"))
     true_version = _cite_archive(_trim(true_version, 49, notes, "true_version"))
     core = _core_id(state)
+    kind = best.get("refute_kind")
+    if kind not in _FALSE_KINDS and kind not in _MISLEADING_KINDS:
+        kind = None
     true_version, correction, what_we_found = _settle_text(
         label,
         true_version,
@@ -753,7 +800,7 @@ def _from_archive(state: dict, notes: list[str]) -> dict:
             {
                 "atomic_id": core,
                 "explanation": explanation,
-                "refute_kind": None,
+                "refute_kind": kind,
                 "citations": ["C1"] if "[C1]" in explanation else [],
             }
         ],
@@ -886,6 +933,20 @@ def _best(state: dict) -> dict:
     if not hits:
         return {}
     return max(hits, key=lambda item: float(item.get("dense_cos") or 0.0))
+
+
+def _photo_weak_caveat(state: dict) -> list[str]:
+    """The lower-tier photo sentence, only when that path decided.
+
+    A tier 1-2 provenance refute does not insert the sentence, so it is
+    not capped and the card does not claim that no such page was found.
+    """
+    if not config.GATE_PHOTO_WEAK_REFUTE:
+        return []
+    needle = config.PHOTO_WEAK_REFUTE_CAVEAT
+    if any(needle in str(item) for item in (state.get("gate_reasons") or [])):
+        return [needle]
+    return []
 
 
 def _weak_caveat(state: dict) -> list[str]:

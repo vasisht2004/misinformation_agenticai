@@ -118,6 +118,12 @@ def _card(state: dict, report: dict | None = None) -> dict:
         "search_status": (report or {}).get("search_status") or "",
         "searches_live": (report or {}).get("searches_live") or 0,
         "searches_cached": (report or {}).get("searches_cached") or 0,
+        "image_provenance": state.get("image_provenance"),
+        "image_consistency": state.get("image_consistency"),
+        # The UI draws the "online since" line from this. None on a text
+        # claim: there is no photograph to date.
+        "photo_lean": photo_lean(state),
+        "image_memory_hit": state.get("image_memory_hit"),
         "core_detail_only_ids": list(state.get("core_detail_only_ids") or []),
         "queries": _queries(state),
         # Known here, one step before the audit row. The details section
@@ -125,6 +131,49 @@ def _card(state: dict, report: dict | None = None) -> dict:
         "cost": _cost(state),
         "run_id": str(marks.get("run_id") or ""),
     }
+
+
+def photo_lean(state: dict) -> dict | None:
+    """How long this photograph has been online, from provenance only.
+
+    first_seen_year is the earliest trusted full or partial match.
+    n_sites is distinct registrable domains, so www and a subdomain are
+    one site. n_dated_earlier counts full or partial matches whose trusted
+    day is before the claimed event, which is the date rule's own test.
+    A text claim has no photograph, so the card field stays empty.
+    """
+    if str(state.get("input_type") or "") != "image":
+        return None
+    from misinfo_agent.provenance import claim_event_date, is_dated_earlier
+    from misinfo_agent.search import registrable_domain, site_host
+
+    raw = state.get("image_provenance")
+    provenance = raw if isinstance(raw, dict) else {}
+    matches = [row for row in (provenance.get("matches") or []) if isinstance(row, dict)]
+    seen = provenance.get("first_seen") if isinstance(provenance.get("first_seen"), dict) else {}
+    event = claim_event_date(state)
+    sites = set()
+    earlier = 0
+    for match in matches:
+        host = str(match.get("host") or site_host(str(match.get("url") or "")) or "").strip()
+        domain = registrable_domain(host) if host else ""
+        if domain:
+            sites.add(domain.casefold())
+        if is_dated_earlier(match, event):
+            earlier += 1
+    year = _year(seen.get("date"))
+    return {
+        "first_seen_year": year,
+        "n_sites": len(sites),
+        "n_dated_earlier": earlier,
+    }
+
+
+def _year(value):
+    text = str(value or "").strip()
+    if len(text) < 4 or not text[:4].isdigit():
+        return None
+    return int(text[:4])
 
 
 def _leans(state: dict) -> dict:

@@ -6,9 +6,9 @@ these tests exercise.
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import sys
-from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,13 +37,16 @@ def _metric(name, order, correct2, decided, wrong3=0):
     }
 
 
-def test_registered_file_has_the_sixteen_claims_dated_today():
+def test_registered_file_keeps_the_claim_date_recorded_in_the_csv():
+    with facts.FACTS_CSV.open(encoding="utf-8", newline="") as handle:
+        recorded = list(csv.DictReader(handle))
     rows = facts.load_facts()
     assert [row["id"] for row in rows] == [f"f{i:02d}" for i in range(1, 17)]
     assert rows[0]["label"] == "True"
     assert rows[1]["label"] == "Misleading"
     assert rows[1]["claim"] == "India has 29 states in total."
-    assert all(row["claim_date"] == date.today().isoformat() for row in rows)
+    assert [row["claim_date"] for row in rows] == [row["claim_date"] for row in recorded]
+    assert len({row["claim_date"] for row in rows}) == 1
     labels = {row["id"]: row["label"] for row in rows}
     assert labels["f04"] == "False"
     assert labels["f16"] == "False"

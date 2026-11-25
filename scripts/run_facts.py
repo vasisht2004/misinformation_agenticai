@@ -81,17 +81,22 @@ _SNAPSHOT: dict | None = None
 
 
 def load_facts(path: Path = FACTS_CSV) -> list[dict]:
-    """The registered rows. claim_date has to be the day this file was written."""
+    """The registered rows. claim_date is the day recorded in the file.
+
+    It is not rewritten to today. A later calendar day has to load the
+    same date the set was written with, or the memory filter and the
+    page-date guard would move under the test.
+    """
     with path.open(encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle))
     if len(rows) != 16:
         raise SystemExit(f"expected 16 facts, found {len(rows)}")
-    today = date.today().isoformat()
     for row in rows:
-        if str(row.get("claim_date") or "") != today:
-            raise SystemExit(
-                f"{row.get('id')} claim_date is {row.get('claim_date')}, today is {today}"
-            )
+        recorded = str(row.get("claim_date") or "")
+        try:
+            date.fromisoformat(recorded)
+        except ValueError:
+            raise SystemExit(f"{row.get('id')} claim_date is not a date: {recorded}")
         if row.get("label") not in {"False", "Misleading", "True"}:
             raise SystemExit(f"unexpected label on {row.get('id')}")
     return rows

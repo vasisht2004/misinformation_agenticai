@@ -70,6 +70,11 @@ def audit(state: dict, *, db_path: Path | str | None = None, additions_path: Pat
         # Queued for the next rebuild. The index box 5 searches is a
         # different file, and this function does not write it.
         _append_addition(additions, state)
+    # After the verdict is on the state. A conflict has no verdict and
+    # is not stored. The row is a hash, not the pixels.
+    from misinfo_agent.image_memory import remember
+
+    remember(state)
     return {"audit": record}
 
 

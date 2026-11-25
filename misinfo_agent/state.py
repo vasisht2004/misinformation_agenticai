@@ -148,6 +148,10 @@ class ClaimState(TypedDict, total=False):
     # Box 5. Hybrid-search hits. Empty means the memory was searched and nothing
     # survived the filters, which is different from the key being absent.
     matches: list
+    # Box 5. Same photograph already checked. Hamming distance is on the
+    # pHash, never on pixels. None when this is not an image or nothing
+    # was close enough. A decided verdict on that row can be reused.
+    image_memory_hit: dict | None
     # Box 6. The single highest-cosine hit, including the archive verdict
     # and true_version. Empty when memory returned nothing. Assess reads
     # this on an exact fresh prior and shows it to the draft on a similar
@@ -156,8 +160,8 @@ class ClaimState(TypedDict, total=False):
 
     # Box 6. "exact", "similar" or "none". Thresholds alone do not decide this.
     # A disagreeing date, amount, year, number, name or subject downgrades
-    # exact to similar, and a picture claim is capped at similar because
-    # there is no image hash yet.
+    # exact to similar. A text hit still cannot identify a picture, so
+    # that cap stays. Image memory can reuse the same file on its own.
     match_type: str
     # Box 6. "reuse_prior" only when the match is exact and fresh. Otherwise
     # "investigate", and the hits are leads rather than a verdict.
@@ -199,6 +203,16 @@ class ClaimState(TypedDict, total=False):
     # miss is neither: it did not spend a credit and it did not read a page.
     searches_live: int
     searches_cached: int
+    # Box 7. Where this photograph appeared before. None for text, a URL,
+    # and a screenshot of a forward (that path stays on OCR). vision_status
+    # is ran, cached, monthly_cap, no_key, error, or not_image. matches
+    # are pages, not web entities. best_guess is generic Vision labels.
+    # first_seen is the earliest trusted date among full or partial matches.
+    image_provenance: dict | None
+    # Box 7. Whether the photograph fits the caption. An observation only.
+    # consistent "no" adds a caveat and a review flag. It does not, by
+    # itself, choose the verdict.
+    image_consistency: dict | None
     # Box 9. How many investigate rounds have already finished. The gate
     # and box 12 stop at config.MAX_SEARCH_ROUNDS. A search_more return
     # is the only write that advances this.
@@ -249,7 +263,9 @@ class ClaimState(TypedDict, total=False):
     citations: list
     # Box 8+10. One entry per atomic claim: atomic_id, explanation,
     # refute_kind, citations. refute_kind is entirely_false, wrong_detail,
-    # or null. The verdict rule reads the core's kind and nothing else.
+    # or null. out_of_context is a photograph whose pages show a different
+    # event or an earlier time; the verdict is then Misleading. The verdict
+    # rule reads the core's kind and nothing else.
     atomic_results: list
     # Box 8+10. Sentences the citation guard dropped, a template that
     # replaced an empty draft, and the note when the model call failed.

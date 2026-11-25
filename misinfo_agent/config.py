@@ -32,6 +32,19 @@ SUBMISSIONS_DB = DATA_DIR / "submissions.db"
 # Tests point this at a temporary directory. data/ is gitignored.
 UPLOADS_DIR = DATA_DIR / "uploads"
 
+# Same-file memory for photographs. pHash, the verdict, and the embedding
+# of the extracted claim. Tests point this at a temporary file so pytest
+# cannot write the real one.
+IMAGE_MEMORY_DB = DATA_DIR / "image_memory.db"
+# imagehash.phash distance. 6 is the same cutoff ingest uses for a
+# repeat submission: a recompress, not a different photograph.
+IMAGE_MEMORY_HAMMING = 6
+# Caption search on a photograph. Off keeps the image run on provenance:
+# Vision and the page fetch still run, and Tavily is not asked.
+# scripts/run_images.py --no-text-search sets this for an eval that must
+# not spend the monthly search budget. A text claim does not read it.
+IMAGE_TEXT_SEARCH = True
+
 # Off unless a real submission turns it on. scripts/try_claim.py does
 # that with --record. Scoring a claim, and a demo of the pipeline, are
 # not another person forwarding it. Box 11's reach reads
@@ -299,6 +312,37 @@ TAVILY_MONTHLY_MAX = 800 if datetime.now(timezone.utc) >= _TAVILY_CAP_REVERTS el
 # so 8 leaves room for a retry without letting one claim spend the month.
 # The counter lives in the process; the caller resets it when a claim starts.
 MAX_SEARCHES_PER_CLAIM = 8
+
+# Google Vision web detection for an event photograph. vision.py is the
+# only module that calls it. 300 is our cap, not Google's. Cached and
+# fake calls do not count. The counter file sits beside this directory
+# so wiping cached detections does not wipe the bill.
+VISION_MONTHLY_MAX = 300
+VISION_CACHE = True
+VISION_CACHE_DIR = DATA_DIR / "cache" / "vision"
+# Pages returned for one photograph. 20 was the first setting. A cached
+# answer from that request does not contain the extra pages, so the cache
+# key includes this number and the photograph is asked again.
+VISION_MAX_RESULTS = 50
+
+# Photo gate. Both on: an earlier or different-event page can refute a
+# picture as out of context, and two full tier 1-2 matches can support
+# it. Off, a picture can still be refuted by text and cannot be confirmed
+# by text, which is the rule these flags sit on top of.
+GATE_PHOTO_CONTEXT = True
+GATE_PHOTO_SUPPORT = True
+# Two provenance groups of any tier can refute a picture when none of
+# them, at any tier, presents the file as this event. The tier 1-2 photo
+# rule is unchanged. The card says no tier 1-2 page was found, and the
+# confidence is capped, because that bar was not met.
+GATE_PHOTO_WEAK_REFUTE = True
+PHOTO_WEAK_REFUTE_CONFIDENCE_CAP = 0.6
+PHOTO_WEAK_REFUTE_CAVEAT = "Lower-tier sources only: no tier 1-2 page was found."
+# A page dated before the claimed event minus this many days is an earlier
+# event. The same window is how close a supporting page has to be to
+# the claim to count as the same occasion: a forward often lands a day
+# or two after the story.
+PHOTO_EARLIER_DAYS = 2
 
 # Investigate rounds the gate and the decider may already have used.
 # The first call usually sees 1 (one search finished). While the count
