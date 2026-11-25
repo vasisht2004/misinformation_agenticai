@@ -14,6 +14,8 @@ so web detection is not spent on a picture of letters.
 
 from __future__ import annotations
 
+import calendar
+import re
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Literal
@@ -33,6 +35,27 @@ _SCREENSHOT_WORDS = 40
 # "untrusted" is a stamp of today, not a day the page was published.
 # linkedin_id is the activity clock, decoded without opening the post.
 _TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text", "linkedin_id"}
+# A partial is only "this file, long ago" when the date came from the
+# page itself. A missing source is not that. trafilatura, the page, and
+# the article text are the metadata the comparison calls "metadata".
+_PARTIAL_TRUSTED = {"htmldate", "url", "trafilatura", "page", "text", "linkedin_id"}
+_MONTH_YEAR = re.compile(
+    r"\b(january|february|march|april|may|june|july|august|september|october|november|december|"
+    r"jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\s+((?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
+_YEAR_MONTH = re.compile(
+    r"\b((?:19|20)\d{2})\s+(january|february|march|april|may|june|july|august|september|october|november|december|"
+    r"jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\b",
+    re.IGNORECASE,
+)
+_YESTERDAY = re.compile(r"\byesterday\b", re.IGNORECASE)
+_MONTH_NUMBER = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
 
 
 class _Mismatch(BaseModel):
@@ -489,18 +512,76 @@ def _rows(state: dict, pages: list[dict], *, id_start: int) -> tuple[list, list]
 
 
 def claim_event_date(state: dict) -> date | None:
-    """The day the caption says the photograph is of, else claim_date.
+    """The first day of the event the caption names, else claim_date.
 
-    Extract copies dates into entities.dates, and for an image into
-    time_clues. That is "extract found one". The day used is one stated
-    in the caption or the claim, because a date the model added is not
-    the event. When extract found none, the forward's claim_date is the
-    day, even if the caption happens to contain a date we did not record.
+    The caption is the claim about when the photograph was taken. "August
+    2026" is that month, "yesterday" is the day before claim_date, and
+    "24 November 2026" is that day. Today is not a stand-in for any of
+    those: a check run in November must not treat a September page as
+    older than an August flood. claim_date is used only when the caption
+    and the claim text name no time at all. The returned day is the start
+    of the range. Earlier means before this start, minus the margin.
     """
-    stated = _extracted_event_date(state)
-    if stated is not None:
-        return stated
-    return _iso(state.get("claim_date"))
+    window = claim_event_window(state)
+    if window is None:
+        return None
+    return window[0]
+
+
+def claim_event_window(state: dict) -> tuple[date, date] | None:
+    """(start, end) inclusive, from the caption, then the claim, then claim_date."""
+    for key in ("caption", "claim"):
+        window = _window_in_text(str(state.get(key) or ""), state.get("claim_date"))
+        if window is not None:
+            return window
+    day = _iso(state.get("claim_date"))
+    if day is None:
+        return None
+    return day, day
+
+
+def _window_in_text(text: str, claim_date) -> tuple[date, date] | None:
+    """A full day, else a month, else yesterday. None when the text has no time."""
+    days = _complete_dates(text)
+    if days:
+        day = max(days)
+        return day, day
+    months = _month_spans(text)
+    if months:
+        start = min(item[0] for item in months)
+        end = max(item[1] for item in months)
+        return start, end
+    if _YESTERDAY.search(text or ""):
+        anchor = _iso(claim_date)
+        if anchor is not None:
+            day = anchor - timedelta(days=1)
+            return day, day
+    return None
+
+
+def _month_spans(text: str) -> list[tuple[date, date]]:
+    """'August 2026' is the 1st through the last day of that month."""
+    found = []
+    seen = set()
+    for match in list(_MONTH_YEAR.finditer(text or "")) + list(_YEAR_MONTH.finditer(text or "")):
+        if match.re is _MONTH_YEAR:
+            name, year_text = match.group(1), match.group(2)
+        else:
+            year_text, name = match.group(1), match.group(2)
+        month = _MONTH_NUMBER.get(name.lower())
+        if month is None:
+            continue
+        year = int(year_text)
+        key = (year, month)
+        if key in seen:
+            continue
+        seen.add(key)
+        last = calendar.monthrange(year, month)[1]
+        try:
+            found.append((date(year, month, 1), date(year, month, last)))
+        except ValueError:
+            continue
+    return found
 
 
 def _extracted_event_date(state: dict) -> date | None:
@@ -563,23 +644,73 @@ def date_is_trusted(source, value) -> bool:
 
 
 def is_dated_earlier(match: dict, event: date | None) -> bool:
-    """A full match whose trusted day is before the event.
+    """A match whose trusted day is before the event start, under PHOTO_RULE.
 
-    Partial and page hits are similar pictures, or a page that contained
-    one. They are not this file, so an old date on them does not refute
-    the caption. The margin is the same one the gate uses, so a story
-    that ran the day before the forward is still this event.
+    event is the start of the caption's range. The margin keeps a story
+    from the day before the event in this event. A page match never
+    dates the file. v0 ignores partials. v1 counts a partial the same
+    way as a full match. v2 and v3 count a partial only when its date is
+    trusted and at least a year before the event starts: a gallery page
+    stamped this year is not an earlier copy of the photograph.
     """
     if event is None or not isinstance(match, dict):
         return False
-    if str(match.get("match") or "") != "full":
+    kind = str(match.get("match") or "")
+    if kind == "page":
         return False
-    if not date_is_trusted(match.get("date_source"), match.get("date")):
+    if kind == "partial" and not _partial_may_date(match, event):
+        return False
+    if kind not in {"full", "partial"}:
+        return False
+    if kind == "full" and not date_is_trusted(match.get("date_source"), match.get("date")):
         return False
     parsed = _iso(match.get("date"))
     if parsed is None:
         return False
+    if kind == "partial" and config.PHOTO_RULE in {"v2", "v3"}:
+        return (event - parsed).days >= config.PHOTO_PARTIAL_MIN_DAYS
     return parsed < event - timedelta(days=config.PHOTO_EARLIER_DAYS)
+
+
+def photo_match_counts(match: dict, event: date | None) -> bool:
+    """True when this page may vote on the photograph under PHOTO_RULE.
+
+    A page hit never votes. v0 is full matches only. v1 lets every
+    partial vote. v2 and v3 let a partial vote only when it is old
+    enough and the date is trusted, so a stance on a lookalike from
+    this year cannot call the caption out of context.
+    """
+    if not isinstance(match, dict):
+        return False
+    kind = str(match.get("match") or "")
+    if kind == "full":
+        return True
+    if kind != "partial":
+        return False
+    rule = str(config.PHOTO_RULE or "v0")
+    if rule == "v0":
+        return False
+    if rule == "v1":
+        return True
+    if event is None:
+        return False
+    return _partial_may_date(match, event)
+
+
+def _partial_may_date(match: dict, event: date) -> bool:
+    """Whether this partial is allowed to carry a date under the active rule."""
+    rule = str(config.PHOTO_RULE or "v0")
+    if rule == "v0":
+        return False
+    if rule == "v1":
+        return date_is_trusted(match.get("date_source"), match.get("date"))
+    source = match.get("date_source")
+    if source not in _PARTIAL_TRUSTED:
+        return False
+    parsed = _iso(match.get("date"))
+    if parsed is None:
+        return False
+    return (event - parsed).days >= config.PHOTO_PARTIAL_MIN_DAYS
 
 
 def earlier_quote(page_date: date, event: date) -> str:

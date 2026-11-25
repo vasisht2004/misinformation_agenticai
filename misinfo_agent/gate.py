@@ -587,8 +587,10 @@ def _photo_out_of_context(state: dict, aid: str) -> list[str] | None:
     names the missing tier 1-2 page so the card can cap the confidence.
     A supporting page of any tier stops only this weaker path.
 
-    Only a full match is this file. A partial or a page hit is a similar
-    picture, and it does not vote on either rule or on True.
+    PHOTO_RULE chooses who votes. v0 is full matches only. v1 adds
+    partials. v2 and v3 keep a partial only when its date is trusted
+    and at least a year before the event. v3 also lets a tier 1-2 full
+    match of this event block the whole out-of-context path.
     """
     grouped = _photo_groups(state)
     if grouped is None:
@@ -642,16 +644,19 @@ def _photo_groups(state: dict) -> dict | None:
     raw = state.get("image_provenance")
     if not isinstance(raw, dict):
         return None
-    # Partials stay on the card as similar images. They are not this
-    # file, so an old date or a refute stance on one cannot decide it.
+    from misinfo_agent.provenance import claim_event_date, is_dated_earlier, photo_match_counts
+
+    # The caption's event, not today and not a bare claim_date when the
+    # caption named a month or a day. Partials vote only under the rule.
+    event = claim_event_date(state)
     matches = [
         row
         for row in (raw.get("matches") or [])
-        if isinstance(row, dict) and str(row.get("match") or "") == "full"
+        if isinstance(row, dict) and photo_match_counts(row, event)
     ]
     if not matches:
         return None
-    claim_date = state.get("claim_date")
+    claim_date = event
     buckets: dict[str, dict] = {}
     for index, match in enumerate(matches):
         name = str(match.get("group_id") or "").strip() or f"row:{index}"
@@ -667,7 +672,7 @@ def _photo_groups(state: dict) -> dict | None:
         )
         tier = _tier(match)
         item["tier"] = min(item["tier"], tier)
-        early = _photo_earlier(match.get("date"), claim_date)
+        early = is_dated_earlier(match, event)
         stance = match.get("stance")
         # An earlier date is a different time even when the model said
         # the page agrees. The date is the part a caption cannot talk past.

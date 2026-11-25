@@ -659,3 +659,103 @@ Rules adjusted after a first run on these same images (post-hoc). The first run 
 
 No full match had a trusted date, so first_seen is empty on every row and nothing was dated earlier. img04, img06, and img07 do have full matches (4, 2, and 5); those pages had no trusted day. The earlier Misleading decisions were partials. img02's twelve pages are page-level hits, not partials. Where a partial did have a trusted year, the card can say "Similar images seen online since" that year: img01 2015, img05 2026, img08 2026, img09 2026, img10 2025, img11 2026, img13 2026, img15 2017.
 
+## IMAGE RULE COMPARISON (post-hoc, 16 images; rule written before scoring)
+
+The event day is the caption's day. "August 2026" is 1–31 August 2026. "yesterday" is the day before claim_date. A full date in the caption is that day. claim_date is used only when the caption names no time. Earlier means before that start, minus PHOTO_EARLIER_DAYS (2). A September 2026 page does not refute an August 2026 caption.
+
+Scored from the Vision cache and the page cache. No live Vision call and no Tavily call. Stances are the ones stored on the blocked re-run; a page that run did not keep stays neutral, and only the date rule can mark it. Blocked drops fact-check hosts. Allowed keeps the fact-check pages Vision itself returned.
+
+Selection rule, applied to blocked mode only:
+
+1. Discard any variant that labels any gold-True image False or Misleading.
+2. Among the rest, pick the most correct 2-class decisions. True against True is correct. False and Misleading are both not-true. Unverifiable is not a decision.
+3. A tie goes to the fewer decisions.
+4. If every variant fails step 1, the choice is v0.
+5. If two variants also tie on the decision count, the lower number wins. v0 admits fewer kinds of page than v1, and v1 fewer than v2 and v3.
+
+v0 is full matches only. v1 adds partials, with the same two-group or one tier 1–2 rule. v2 is v1, but a partial counts only with a trusted date (htmldate, url, metadata, or a LinkedIn id) at least 365 days before the event start. v3 is v2, plus a tier 1–2 full match dated on or after the event and supporting that event blocks out of context.
+
+### Same file or a different photograph
+
+A full match is this file, including a crop or a resize. A partial match is a different photograph of a similar scene.
+
+img05's only earlier page is india.gov.in, a partial, tier 1, metadata date 2026-01-01, title "Photographs (PIB)". That is a different photograph, or a gallery index, not this file. It is about ten months before the 24 November 2026 caption, so v1 counts it and v2 does not. The PIB partial dated 2026-11-24 is the event day and is still a partial.
+
+img07 has five full matches, all pib.gov.in "Photo Album | PIB", and none of them has a date. Those are this photograph. No Vision page shows this file at an earlier time. The only dated page is powerthesaurus.org, a page-level hit on 2023-10-27 titled "AWARDS CEREMONY Definition & Meaning". That is a dictionary page, not this photograph.
+
+### Pages that can date a file
+
+Every Vision page was read. Stance on the stored re-run is neutral for each of these. Undated social, music, and dictionary hits are omitted here; they have no date and no stance, so no variant can date the file from them.
+
+img01, 50 pages. One full match: thequint.com, tier 2, htmldate 2026-09-07, "Old Photo From Vietnam Falsely Shared…". That day is after August 2026, so it does not refute. Dated partials: grupoanimal.mx tier 4 htmldate 2015-05-06; offbeatconcerns.com tier 4 htmldate 2026-09-07. firstpost.com is a tier 2 partial with no date.
+
+img05, 20 pages. Partials: india.gov.in tier 1 metadata 2026-01-01; pib.gov.in tier 1 htmldate 2026-11-24; three other pib.gov.in partials with no date. Dated page hits, not this photograph: gabrielino.sgusd.k12.ca.us htmldate 2024-12-19, lexupapp.com metadata 2026-09-08, finesentence.com metadata 2024-01-01.
+
+img07, 37 pages. Five full pib.gov.in matches, no date. One dated page hit: powerthesaurus.org tier 4 htmldate 2023-10-27. No partials.
+
+img09, 23 pages. One full match: english.factcrescendo.com tier 4 htmldate 2026-07-27, dropped when fact-check hosts are blocked. Dated partials, all 2026, so none is a year before the claim date: thebetterindia.com 2026-03-10, 2026-07-24, 2026-08-12, 2026-11-07; donatekart.com 2026-07-24; bharatsevashramsangha.org 2026-08-03; mathrubhumi.com 2026-09-30. aljazeera.com is a page hit, tier 2, htmldate 2026-08-07.
+
+img11, 26 pages. One full match: newschecker.in tier 4 htmldate 2026-06-22, a fact-check host. Dated partials are 2026-06-19 (bhaskar.com, divyabhaskar.co.in, mpcg24news.in) or 2026-11-22. None is a year before the June 2026 caption.
+
+img15, 43 pages. Full matches with no date: timesheadline.in and altnews.in, both fact-check hosts. Dated partials a year or more before August 2026: indianexpress.com tier 2 htmldate 2017-04-10 and 2024-05-21, hindustantimes.com tier 2 htmldate 2024-05-21. Those are different photographs. v2 and v3 count them, which is the one decision in the tables.
+
+### Blocked
+
+| image | gold | v0 | v1 | v2 | v3 |
+| --- | --- | --- | --- | --- | --- |
+| img01 | Misleading | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img02 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img03 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img04 | True | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img05 | True | Unverifiable | Misleading | Unverifiable | Unverifiable |
+| img06 | True | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img07 | True | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img08 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img09 | Misleading | Unverifiable | Misleading | Unverifiable | Unverifiable |
+| img10 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img11 | Misleading | Unverifiable | Misleading | Unverifiable | Unverifiable |
+| img12 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img13 | False | Unverifiable | Misleading | Unverifiable | Unverifiable |
+| img14 | Misleading | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img15 | Misleading | Unverifiable | Misleading | Misleading | Misleading |
+| img16 | Misleading | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+
+| | decided | correct 2c | wrong 2c | abstained | gold-True called not-true |
+| --- | --- | --- | --- | --- | --- |
+| v0 | 0 | 0 | 0 | 16 | 0 |
+| v1 | 5 | 4 | 1 | 11 | 1 (img05) |
+| v2 | 1 | 1 | 0 | 15 | 0 |
+| v3 | 1 | 1 | 0 | 15 | 0 |
+
+### Allowed
+
+| image | gold | v0 | v1 | v2 | v3 |
+| --- | --- | --- | --- | --- | --- |
+| img01 | Misleading | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img02 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img03 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img04 | True | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img05 | True | Unverifiable | Misleading | Unverifiable | Unverifiable |
+| img06 | True | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img07 | True | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img08 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img09 | Misleading | Unverifiable | Misleading | Unverifiable | Unverifiable |
+| img10 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img11 | Misleading | Unverifiable | Misleading | Unverifiable | Unverifiable |
+| img12 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img13 | False | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img14 | Misleading | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+| img15 | Misleading | Unverifiable | Misleading | Misleading | Misleading |
+| img16 | Misleading | Unverifiable | Unverifiable | Unverifiable | Unverifiable |
+
+| | decided | correct 2c | wrong 2c | abstained | gold-True called not-true |
+| --- | --- | --- | --- | --- | --- |
+| v0 | 0 | 0 | 0 | 16 | 0 |
+| v1 | 4 | 3 | 1 | 12 | 1 (img05) |
+| v2 | 1 | 1 | 0 | 15 | 0 |
+| v3 | 1 | 1 | 0 | 15 | 0 |
+
+v1 fails step 1 because it calls img05 Misleading. v0, v2, and v3 do not. v2 and v3 each have one correct decision and v0 has none, so v0 drops out. v2 and v3 tie on correct decisions and on the decision count. Step 5 picks the lower number. The choice is v2, and `PHOTO_RULE` is `v2`.
+
+The allowed table keeps a fact-check page at neutral when the blocked re-run never stored a stance for it. A cache-only smoke of img01, with fact-check pages allowed, reads thequint.com. The page is dated 2026-09-07, which is not before August 2026, so n_dated_earlier stays 0. The stance on that page is what fires out of context. Vision stayed at 17 and Tavily stayed at 895.
+

@@ -341,8 +341,18 @@ PHOTO_WEAK_REFUTE_CAVEAT = "Lower-tier sources only: no tier 1-2 page was found.
 # A page dated before the claimed event minus this many days is an earlier
 # event. The same window is how close a supporting page has to be to
 # the claim to count as the same occasion: a forward often lands a day
-# or two after the story.
+# or two after the story. The event day comes from the caption, not from
+# today. See provenance.claim_event_date.
 PHOTO_EARLIER_DAYS = 2
+# Which pages may date a photograph.
+# v0: full matches only.
+# v1: full and partial. Two dated-earlier groups, or one tier 1-2 group.
+# v2: v1, but a partial counts only with a trusted date at least
+#     PHOTO_PARTIAL_MIN_DAYS before the event starts.
+# v3: v2, and a tier 1-2 full match of this event blocks out of context.
+# The comparison that picked the value is in docs/eval_diagnosis.md.
+PHOTO_RULE = "v2"
+PHOTO_PARTIAL_MIN_DAYS = 365
 
 # Investigate rounds the gate and the decider may already have used.
 # The first call usually sees 1 (one search finished). While the count

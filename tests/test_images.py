@@ -1052,8 +1052,8 @@ def test_extract_date_is_the_event_and_claim_date_is_the_fallback(tmp_path, monk
     assert "before the claimed event" not in by_url["https://www.reuters.com/january"]["quote"]
     assert found["image_provenance"]["first_seen"]["date"] == "2026-08-01"
     assert all(row["url"] != "https://www.reuters.com/january" for row in found["evidence"])
-    # No extracted date: the caption's March day is ignored and claim_date
-    # is the event, so the August page is now earlier too.
+    # The caption's 10 March is the event even when extract recorded nothing.
+    # The August page is after that day, so it is not an earlier copy.
     clear_fake()
     set_fake(
         lambda image: {
@@ -1074,10 +1074,8 @@ def test_extract_date_is_the_event_and_claim_date_is_the_fallback(tmp_path, monk
     finally:
         clear_fake()
         clear_fake_llm()
-    assert calls["n"] == 0
-    assert missed["image_provenance"]["matches"][0]["quote"] == (
-        "Image on this page dated 2026-08-01, before the claimed event (2026-09-01)."
-    )
+    assert calls["n"] == 1
+    assert "before the claimed event" not in missed["image_provenance"]["matches"][0]["quote"]
 
 
 def test_linkedin_id_dates_a_photo_without_fetching(tmp_path):
@@ -1298,6 +1296,9 @@ def test_cache_only_does_not_call_vision(tmp_path):
 
 
 def test_partial_from_2019_never_refutes_and_two_full_matches_do(tmp_path, monkeypatch):
+    # This is the v0 contract: a lookalike does not vote. v1 and v2 are
+    # covered by their own tests, so a later default does not rewrite this one.
+    monkeypatch.setattr(config, "PHOTO_RULE", "v0")
     jpeg = _jpeg(tmp_path)
     set_fake(
         lambda image: {
@@ -1375,7 +1376,8 @@ def test_partial_from_2019_never_refutes_and_two_full_matches_do(tmp_path, monke
     assert "out of context" in " ".join(refuted["gate_reasons"]).casefold()
 
 
-def test_genuine_photo_with_only_partial_earlier_matches_is_not_out_of_context():
+def test_genuine_photo_with_only_partial_earlier_matches_is_not_out_of_context(monkeypatch):
+    monkeypatch.setattr(config, "PHOTO_RULE", "v0")
     from app.components import card_html, view_model
     from misinfo_agent.output import render
 
@@ -1498,3 +1500,122 @@ def test_run_images_uses_a_fresh_image_memory(monkeypatch):
     assert path == config.IMAGE_MEMORY_DB
     assert path.name == "image_memory.db"
     assert "image-memory-eval-" in str(path.parent)
+
+
+def test_september_page_does_not_refute_an_august_claim(monkeypatch):
+    """The event is the caption's month, not the day the check is run."""
+    monkeypatch.setattr(config, "PHOTO_RULE", "v0")
+    state = _claim(
+        "This photo shows the Nepal floods in August 2026.",
+        caption="This photo shows the Nepal floods in August 2026.",
+        claim_date="2026-11-25",
+        image_provenance={
+            "vision_status": "cached",
+            "best_guess": [],
+            "first_seen": {"date": "2026-09-07", "url": "https://news.example/a", "host": "news.example", "tier": 2},
+            "matches": [
+                _match(
+                    group_id="G1",
+                    url="https://news.example/a",
+                    host="news.example",
+                    tier=2,
+                    date="2026-09-07",
+                    date_source="htmldate",
+                    stance="neutral",
+                    quote="",
+                ),
+                _match(
+                    group_id="G2",
+                    url="https://other.example/b",
+                    host="other.example",
+                    tier=2,
+                    date="2026-09-12",
+                    date_source="htmldate",
+                    stance="neutral",
+                    quote="",
+                ),
+            ],
+        },
+    )
+    from misinfo_agent.provenance import claim_event_date, is_dated_earlier
+
+    assert claim_event_date(state).isoformat() == "2026-08-01"
+    assert is_dated_earlier(state["image_provenance"]["matches"][0], claim_event_date(state)) is False
+    judged = gate(state)
+    assert judged["atomic_status"]["A1"] != "refuted"
+    assert "out of context" not in " ".join(judged["gate_reasons"]).casefold()
+
+
+def test_yesterday_and_an_explicit_day_are_the_event():
+    from datetime import date
+
+    from misinfo_agent.provenance import claim_event_window
+
+    yesterday = _claim(
+        "This photo was taken yesterday.",
+        caption="This photo was taken yesterday.",
+        claim_date="2026-11-25",
+    )
+    assert claim_event_window(yesterday) == (date(2026, 11, 24), date(2026, 11, 24))
+    explicit = _claim(
+        "The flood on 10 March 2026.",
+        caption="The flood on 10 March 2026.",
+        claim_date="2026-11-25",
+    )
+    assert claim_event_window(explicit) == (date(2026, 3, 10), date(2026, 3, 10))
+    month = _claim("Floods in August 2026.", caption="Floods in August 2026.", claim_date="2026-11-25")
+    assert claim_event_window(month) == (date(2026, 8, 1), date(2026, 8, 31))
+
+
+def test_photo_rule_variants(monkeypatch):
+    """v1 counts lookalikes, v2 only a year-old trusted one, v3 a same-event full match blocks."""
+    from misinfo_agent.provenance import claim_event_date, is_dated_earlier
+
+    def _state(matches, caption="This photo shows the library opening on 10 March 2026."):
+        return _claim(caption, caption=caption, claim_date="2026-11-25", image_provenance={
+            "vision_status": "cached",
+            "best_guess": [],
+            "first_seen": None,
+            "matches": matches,
+        })
+
+    recent = [
+        _match(group_id="G1", url="https://a.example/a", host="a.example", match="partial",
+               date="2026-01-01", date_source="trafilatura", stance="refutes", tier=1),
+        _match(group_id="G2", url="https://b.example/b", host="b.example", match="partial",
+               date="2026-02-01", date_source="htmldate", stance="refutes", tier=4),
+    ]
+    monkeypatch.setattr(config, "PHOTO_RULE", "v1")
+    state = _state(recent)
+    event = claim_event_date(state)
+    assert is_dated_earlier(recent[0], event) is True
+    assert gate(state)["atomic_status"]["A1"] == "refuted"
+
+    monkeypatch.setattr(config, "PHOTO_RULE", "v2")
+    # January is the same year as March, so a lookalike does not count.
+    assert is_dated_earlier(recent[0], event) is False
+    assert gate(_state(recent))["atomic_status"]["A1"] != "refuted"
+    old = [
+        _match(group_id="G1", url="https://a.example/a", host="a.example", match="partial",
+               date="2019-08-01", date_source="htmldate", stance="refutes", tier=2),
+        _match(group_id="G2", url="https://b.example/b", host="b.example", match="partial",
+               date="2018-01-01", date_source="url", stance="refutes", tier=4),
+    ]
+    assert is_dated_earlier(old[0], event) is True
+    assert gate(_state(old))["atomic_status"]["A1"] == "refuted"
+    untrusted = [
+        _match(group_id="G1", url="https://a.example/a", host="a.example", match="partial",
+               date="2015-05-06", date_source="none", stance="refutes", tier=2),
+        _match(group_id="G2", url="https://b.example/b", host="b.example", match="partial",
+               date="2014-01-01", date_source=None, stance="refutes", tier=2),
+    ]
+    assert gate(_state(untrusted))["atomic_status"]["A1"] != "refuted"
+
+    monkeypatch.setattr(config, "PHOTO_RULE", "v3")
+    blocked = _state(old + [
+        _match(group_id="G3", url="https://pib.gov.in/photo", host="pib.gov.in", match="full",
+               date="2026-03-10", date_source="htmldate", stance="supports", tier=1, quote="The opening."),
+    ])
+    judged = gate(blocked)
+    assert judged["atomic_status"]["A1"] != "refuted"
+    assert "out of context" not in " ".join(judged["gate_reasons"]).casefold()
