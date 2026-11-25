@@ -60,7 +60,7 @@ a {{
 .fl-tab {{
   text-decoration: none !important;
 }}
-.fl-seen a, .fl-ev a {{
+.fl-seen a, .fl-ev a, .fl-image a {{
   color: #F2F0EA !important;
 }}
 .fl-cite {{
@@ -293,13 +293,219 @@ a {{
   letter-spacing: 0.04em;
   margin-top: 0.1rem;
 }}
-.fl-search-banner {{
+.fl-search-banner, .fl-vision-banner {{
   background: #3A3018;
   color: #E3C27A;
   border: 1px solid #E8A33D;
   border-radius: 10px;
   padding: 0.7rem 0.9rem;
   margin: 0 0 0.8rem;
+}}
+
+.fl-image {{
+  background: #0F1B36;
+  border: 1px solid #1E2A45;
+  border-radius: 10px;
+  padding: 0.95rem 1rem 1.1rem;
+  margin: 0.8rem 0 0.4rem;
+}}
+.fl-image-top {{
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 1rem 1.1rem;
+  align-items: start;
+}}
+.fl-thumb {{
+  display: block;
+  width: 220px;
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid #1E2A45;
+  background: #0A0B0E;
+}}
+.fl-thumb-missing {{
+  width: 220px;
+  max-width: 100%;
+  height: 148px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #A7B0C2;
+  font-size: 0.85rem;
+  border-radius: 10px;
+  border: 1px dashed #1E2A45;
+  background: #0A0B0E;
+}}
+.fl-sees {{ margin-top: 0.55rem; }}
+.fl-sees-title, .fl-clue-k {{
+  color: #A7B0C2;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0.35rem 0 0.12rem;
+}}
+.fl-sees-title {{ margin-top: 0; }}
+.fl-clue {{
+  font-size: 0.78rem;
+  padding: 0.12rem 0.5rem;
+}}
+.fl-caption {{
+  font-size: 1.08rem;
+  margin: 0 0 0.7rem;
+}}
+.fl-cap-yes p {{ margin: 0.15rem 0; color: #8FBF9A; }}
+.fl-cap-unclear p {{ margin: 0.15rem 0; color: #7C8AA5; }}
+.fl-cap-no {{
+  background: #3A3018;
+  border: 1px solid #E8A33D;
+  border-radius: 10px;
+  padding: 0.7rem 0.85rem;
+  color: #E3C27A;
+}}
+.fl-cap-no p {{ margin: 0.15rem 0; }}
+.fl-cap-no ul {{ margin: 0.35rem 0 0.2rem; padding-left: 1.1rem; }}
+.fl-observe {{
+  color: #A7B0C2 !important;
+  font-size: 0.75rem !important;
+  letter-spacing: 0.03em;
+}}
+.fl-cap-no .fl-observe {{ color: #F2F0EA !important; }}
+.fl-first {{ margin-top: 1.1rem; }}
+.fl-first-title {{
+  font-family: {_DISPLAY};
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.92rem;
+  color: #E05A47;
+  margin: 0;
+}}
+.fl-first-date {{
+  font-family: {_DISPLAY};
+  font-weight: 700;
+  font-size: clamp(2.6rem, 7vw, 4.6rem);
+  letter-spacing: -0.03em;
+  line-height: 0.9;
+  margin: 0.1rem 0 0.25rem;
+  color: #F2F0EA;
+}}
+.fl-first-meta {{
+  margin: 0.2rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}}
+.fl-timeline {{ margin-top: 1rem; }}
+.fl-tl-row {{
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}}
+.fl-tl-row::before {{
+  content: "";
+  position: absolute;
+  left: 0.4rem;
+  right: 0.4rem;
+  top: 5px;
+  height: 2px;
+  background: #1E2A45;
+}}
+.fl-tl-point {{
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
+}}
+.fl-tl-toggle {{
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  pointer-events: none;
+}}
+.fl-tl-mark {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}}
+.fl-tl-dot {{
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #7C8AA5;
+  border: 2px solid #0A0B0E;
+  position: relative;
+  z-index: 1;
+  display: inline-block;
+}}
+.fl-tl-point.is-refutes .fl-tl-dot,
+.fl-tl-dot.is-refutes {{ background: #E05A47; }}
+.fl-tl-point.is-supports .fl-tl-dot,
+.fl-tl-dot.is-supports {{ background: #3FB27F; }}
+.fl-tl-point.is-neutral .fl-tl-dot,
+.fl-tl-dot.is-neutral {{ background: #7C8AA5; }}
+/* The earliest copy is the fact this section is about, so it stays
+   coral and larger even when that page's stance is support or neutral. */
+.fl-tl-point.is-first .fl-tl-dot {{
+  width: 18px;
+  height: 18px;
+  margin-top: -3px;
+  background: #E05A47;
+  box-shadow: 0 0 0 4px rgba(224, 90, 71, 0.28);
+}}
+.fl-tl-date {{
+  font-family: {_DISPLAY};
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: -0.02em;
+  color: #F2F0EA;
+}}
+.fl-tl-pop {{
+  display: none;
+  text-align: left;
+  background: #0A0B0E;
+  border: 1px solid #1E2A45;
+  border-radius: 10px;
+  padding: 0.6rem 0.7rem;
+  margin-top: 0.45rem;
+}}
+.fl-tl-point:hover .fl-tl-pop,
+.fl-tl-point:focus-within .fl-tl-pop,
+.fl-tl-toggle:checked ~ .fl-tl-pop {{
+  display: block;
+}}
+.fl-tl-quote {{
+  margin: 0.35rem 0;
+  color: #F2F0EA;
+  font-size: 0.92rem;
+}}
+.fl-undated {{ margin-top: 0.8rem; }}
+.fl-undated-row {{
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  background: #0A0B0E;
+  border: 1px solid #1E2A45;
+  border-radius: 10px;
+  padding: 0.55rem 0.7rem;
+  margin: 0.35rem 0;
+}}
+.fl-undated-body {{ min-width: 0; }}
+.fl-verdict-word.is-context {{
+  font-size: clamp(2rem, 5.6vw, 4.2rem);
+  line-height: 0.92;
+}}
+.fl-image-prompt {{
+  color: #F2F0EA;
+  font-size: 1.02rem;
+  margin: 0.2rem 0 0.35rem;
 }}
 
 .fl-src-lean {{
@@ -598,6 +804,10 @@ button[data-testid="stBaseButton-secondary"]:hover {{
 
 @media (max-width: 800px) {{
   .fl-hero {{ padding: 1.4rem 1rem; }}
+  .fl-image-top {{ grid-template-columns: 1fr; }}
+  .fl-thumb, .fl-thumb-missing {{ width: 100%; max-width: 320px; }}
+  .fl-timeline {{ overflow-x: auto; }}
+  .fl-tl-row {{ min-width: 520px; }}
 }}
 
 @media (prefers-reduced-motion: no-preference) {{

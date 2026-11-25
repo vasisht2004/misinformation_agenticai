@@ -1,0 +1,49 @@
+{
+  "input_type": "image",
+  "caption": "The mayor announced the bridge is closed.",
+  "claim": "The mayor announced the bridge is closed.",
+  "verdict": "Unverifiable",
+  "confidence": 0.55,
+  "priority": "Low",
+  "provisional": false,
+  "alert_pending_approval": false,
+  "route": "investigate",
+  "match_type": "none",
+  "decision": "store",
+  "gate": "insufficient",
+  "search_status": "ran",
+  "unverifiable_reason": "picture",
+  "best_match": {},
+  "red_flags": [],
+  "explanation": "The words in the caption were not confirmed by two independent sources.",
+  "true_version": "",
+  "correction_message": "We could not find two independent credible sources, so this is not confirmed.",
+  "image_path": "placeholder.jpg",
+  "image_consistency": {
+    "consistent": "unclear",
+    "mismatches": [
+      {
+        "detail": "Should not list",
+        "observed": "hidden observed",
+        "expected": "hidden expected"
+      }
+    ],
+    "place_clues": [
+      "a bridge"
+    ],
+    "time_clues": [
+      "daytime"
+    ]
+  },
+  "image_provenance": {
+    "vision_status": "no_key",
+    "api_key": "AIzaSyFAKEKEYSHOULDNOTRENDER",
+    "matches": [],
+    "first_seen": null,
+    "best_guess": [
+      "A bridge in daylight"
+    ]
+  },
+  "image_memory_hit": null,
+  "evidence": []
+}

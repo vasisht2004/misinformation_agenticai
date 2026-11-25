@@ -8,17 +8,26 @@ that merge still has to render.
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
+
+from PIL import Image
+
 from app.components import (
     APP_NAME,
+    IMAGE_BYTE_LIMIT,
     card_html,
     esc,
     evidence_html,
+    image_prompt_html,
+    image_too_large,
     load_fixture,
     quota_html,
     safe_href,
     search_banner_text,
     stepper_html,
     view_model,
+    vision_banner_text,
 )
 from app.theme import CSS
 
@@ -78,6 +87,14 @@ def test_missing_new_fields_do_not_crash():
     assert model["unverifiable_reason"] == ""
     assert model["review_status"] == ""
     assert model["review_reason"] == ""
+    assert model["input_type"] == ""
+    assert model["caption"] == ""
+    assert model["image_path"] == ""
+    assert model["refute_kind"] == ""
+    assert model["image_provenance"] is None
+    assert model["image_consistency"] is None
+    assert model["image_memory_hit"] is None
+    assert "Image check" not in html
 
 
 def test_fixtures_cover_the_named_cards():
@@ -309,3 +326,293 @@ def test_states_29_card_hides_the_weak_match_and_does_not_contradict_itself():
         "India is a federal union comprising 28 states and 8 union territories [E1]."
     ) in html
     assert "https://en.wikipedia.org/wiki/States_and_union_territories_of_India" in html
+
+
+def _card(name: str) -> str:
+    return card_html(view_model(load_fixture(name)))
+
+
+def _timeline(html: str) -> str:
+    chunk = html.split("<div class='fl-timeline'>", 1)[1]
+    # Undated rows sit in the same section, under the dated line.
+    if "<div class='fl-undated'>" in chunk:
+        chunk = chunk.split("<div class='fl-undated'>", 1)[0]
+    return chunk
+
+
+def test_placeholder_jpeg_is_generated_and_has_no_exif():
+    path = Path("app/fixtures/placeholder.jpg")
+    raw = path.read_bytes()
+    assert raw.startswith(b"\xff\xd8\xff")
+    image = Image.open(path)
+    assert image.size == (960, 600)
+    # JPEG quantises the flat navy. The corner stays that field, not a photo.
+    red, green, blue = image.getpixel((0, 0))[:3]
+    assert abs(red - 15) <= 2
+    assert abs(green - 27) <= 2
+    assert abs(blue - 54) <= 2
+    assert not image.getexif()
+
+
+def test_image_out_of_context_card():
+    html = _card("image_out_of_context")
+    assert "fl-verdict-word is-context" in html
+    assert "MISLEADING · OUT OF CONTEXT" in html
+    assert "color: #E8A33D" in html
+    assert "fl-ring" in html
+    assert "Image check" in html
+    assert "data:image/jpeg;base64," in html
+    encoded = base64.b64encode(Path("app/fixtures/placeholder.jpg").read_bytes()).decode("ascii")
+    assert encoded in html
+    assert "Flooding in Mumbai this morning" in html
+    assert "What the AI sees" in html
+    assert "hill town" in html
+    assert "snow on roofs" in html
+    assert "winter light" in html
+    assert "Snow on a hill town" in html
+    assert "fl-cap-no" in html
+    assert "The caption does not match the image." in html
+    assert "Place: a snowy hill town vs flooded streets in Mumbai" in html
+    assert "Time: winter light and bare trees vs November 2026 monsoon flooding" in html
+    assert "AI observation — not a verdict" in html
+    assert "First seen online" in html
+    assert "12 Mar 2019" in html
+    assert "hillwire.example" in html
+    assert "T3" in html
+    assert "https://hillwire.example/2019/03/snow-on-the-ridge" in html
+    assert 'rel="noopener noreferrer"' in html
+    timeline = _timeline(html)
+    assert timeline.index("12 Mar 2019") < timeline.index("2 Nov 2024") < timeline.index("12 Nov 2026")
+    assert timeline.count("is-first") == 1
+    assert "fl-tl-point is-neutral is-first" in timeline
+    assert "is-refutes" in timeline
+    assert "is-supports" in timeline
+    assert "Full match" in timeline
+    assert "Partial match" in timeline
+    assert "fl-undated" in html
+    assert "bad.example" in html
+    assert "<script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "javascript:" not in html.lower()
+    seen = html.split("fl-image-seen", 1)[1][:500]
+    assert ">Misleading<" in seen
+    assert "12 Mar 2019" in seen
+    assert "0.07" in seen
+    assert "img-thread-2019" not in html
+    first_rule = CSS.split(".fl-tl-point.is-first .fl-tl-dot")[1].split("}")[0]
+    refute_rule = CSS.split(".fl-tl-point.is-refutes .fl-tl-dot")[1].split("}")[0]
+    support_rule = CSS.split(".fl-tl-point.is-supports .fl-tl-dot")[1].split("}")[0]
+    assert "#E05A47" in first_rule
+    assert "18px" in first_rule
+    assert "#E05A47" in refute_rule
+    assert "#3FB27F" in support_rule
+    assert CSS.index(".fl-tl-point.is-supports .fl-tl-dot") < CSS.index(".fl-tl-point.is-first .fl-tl-dot")
+
+
+def test_image_genuine_card():
+    html = _card("image_genuine")
+    assert ">True</h2>" in html
+    assert "OUT OF CONTEXT" not in html
+    assert "fl-cap-yes" in html
+    assert "fl-cap-no" not in html
+    assert "The caption matches what the image shows." in html
+    assert "AI observation — not a verdict" in html
+    assert "river front" in html
+    assert "June light" in html
+    assert "A glass building beside a river" in html
+    assert "First seen online" in html
+    assert "4 Jun 2024" in html
+    assert "alderport.example" in html
+    assert "T1" in html
+    assert "https://alderport.example/news/library-opens" in html
+    timeline = _timeline(html)
+    assert timeline.index("4 Jun 2024") < timeline.index("5 Jun 2024")
+    assert "fl-tl-point is-supports is-first" in timeline
+    assert timeline.count("is-first") == 1
+    assert "Full match" in timeline
+    assert "fl-image-seen" not in html
+    assert "data:image/jpeg;base64," in html
+    assert "Image check" in html
+
+
+def test_image_no_caption_card():
+    html = _card("image_no_caption")
+    assert ">Other</h2>" in html
+    assert "Image check" in html
+    assert "fl-thumb-missing" in html
+    assert "Image not stored" in html
+    assert "data:image" not in html
+    assert "No caption supplied." in html
+    assert "fl-cap-unclear" in html
+    assert "It is unclear whether the caption matches the image." in html
+    assert "AI observation — not a verdict" in html
+    assert "indoor hall" in html
+    assert "First seen online" in html
+    assert "19 Aug 2021" in html
+    assert "archive.example" in html
+    assert "https://archive.example/2021/08/hall-photo" in html
+    assert "T4" in html
+    assert "Undated matches" in html
+    assert "http://notes.example/same-hall" in html
+    assert "Same hall, no date on the page." in html
+    assert "Partial match" in html
+    timeline = _timeline(html)
+    assert "19 Aug 2021" in timeline
+    assert "notes.example" not in timeline
+
+
+def test_image_no_key_and_vision_banners():
+    html = _card("image_no_key")
+    banner = "Reverse image search isn't set up"
+    assert vision_banner_text(view_model(load_fixture("image_no_key"))["image_provenance"]) == banner
+    assert esc(banner) in html
+    assert "AIzaSyFAKEKEYSHOULDNOTRENDER" not in html
+    assert "api_key" not in html
+    assert "no_key" not in html
+    assert "First seen online" not in html
+    assert "Should not list" not in html
+    assert "hidden observed" not in html
+    assert "fl-cap-unclear" in html
+    assert "A bridge in daylight" in html
+    assert "a bridge" in html
+    assert "daytime" in html
+    assert "Text sources cannot confirm what a picture shows." in html
+    assert "data:image/jpeg;base64," in html
+    cases = {
+        "no_key": "Reverse image search isn't set up",
+        "monthly_cap": "Reverse image search limit reached this month",
+        "error": "Reverse image search failed; the result uses other evidence only",
+    }
+    for status, sentence in cases.items():
+        rendered = card_html(view_model({
+            "input_type": "image",
+            "caption": "A caption",
+            "image_provenance": {
+                "vision_status": status,
+                "api_key": "SECRET-KEY-99",
+                "token": "SECRET-KEY-99",
+            },
+        }))
+        assert vision_banner_text({"vision_status": status}) == sentence
+        assert esc(sentence) in rendered
+        assert "SECRET-KEY-99" not in rendered
+    stuffed = card_html(view_model({
+        "input_type": "image",
+        "image_provenance": {"vision_status": "error api_key=SECRET-KEY-99"},
+    }))
+    assert esc(cases["error"]) in stuffed
+    assert "SECRET-KEY-99" not in stuffed
+    assert "api_key" not in stuffed
+    quiet = card_html(view_model({
+        "input_type": "image",
+        "image_provenance": {"vision_status": "ok", "matches": [], "first_seen": None},
+    }))
+    assert "Reverse image search" not in quiet
+    assert "No earlier copies were found online." in quiet
+    assert vision_banner_text({"vision_status": "ok"}) == ""
+    assert vision_banner_text(None) == ""
+
+
+def test_image_section_escapes_and_stays_off_text_cards():
+    plain = _card("true")
+    assert "Image check" not in plain
+    assert "First seen online" not in plain
+    misleading = _card("misleading")
+    assert "OUT OF CONTEXT" not in misleading
+    assert ">Misleading</h2>" in misleading
+    kind_only = card_html(view_model({
+        "input_type": "text",
+        "verdict": "Misleading",
+        "confidence": 0.4,
+        "atomic_claims": [{"id": "A1", "core": True}],
+        "atomic_results": [{"atomic_id": "A1", "refute_kind": "out_of_context"}],
+    }))
+    assert "MISLEADING · OUT OF CONTEXT" in kind_only
+    assert "Image check" not in kind_only
+    side = card_html(view_model({
+        "verdict": "True",
+        "confidence": 0.8,
+        "atomic_claims": [{"id": "A1", "core": True}, {"id": "A2", "core": False}],
+        "atomic_results": [
+            {"atomic_id": "A1", "refute_kind": None},
+            {"atomic_id": "A2", "refute_kind": "out_of_context"},
+        ],
+    }))
+    assert "OUT OF CONTEXT" not in side
+    assert ">True</h2>" in side
+    kept = card_html(view_model({
+        "verdict": "True",
+        "confidence": 0.8,
+        "refute_kind": "out_of_context",
+    }))
+    assert "OUT OF CONTEXT" not in kept
+    hostile = card_html(view_model({
+        "input_type": "image",
+        "caption": "<b>caption</b>",
+        "image_path": "javascript:alert(1)",
+        "image_consistency": {
+            "consistent": "no",
+            "mismatches": [{
+                "detail": "<i>place</i>",
+                "observed": "<script>",
+                "expected": "x",
+            }],
+            "place_clues": ["<img>"],
+        },
+        "image_provenance": {
+            "vision_status": "ok",
+            "matches": [{
+                "url": "data:text/html,<script>alert(1)</script>",
+                "host": "x.example",
+                "quote": "<b>no</b>",
+                "date": "2020-01-01",
+                "stance": "neutral",
+                "match": "full",
+                "tier": 4,
+            }],
+            "first_seen": {
+                "date": "2020-01-01",
+                "url": "javascript:alert(1)",
+                "host": "x.example",
+                "tier": 1,
+            },
+        },
+    }))
+    assert "<script>" not in hostile
+    assert "<b>" not in hostile
+    assert "<i>" not in hostile
+    assert "<img>" not in hostile
+    assert "javascript:" not in hostile.lower()
+    assert "data:text/html" not in hostile
+    assert "fl-thumb-missing" in hostile
+    assert "&lt;script&gt;" in hostile
+    assert "&lt;b&gt;caption&lt;/b&gt;" in hostile
+    assert "x.example" in hostile
+    first = hostile.split("fl-first", 1)[1].split("fl-timeline", 1)[0]
+    assert "href=" not in first
+    assert "View page" not in first
+    sparse = card_html(view_model({
+        "input_type": "image",
+        "image_provenance": {"matches": [{"stance": "refutes"}]},
+    }))
+    assert "unknown source" in sparse
+    assert "Undated matches" in sparse
+    assert "Image check" in card_html(view_model({"input_type": "image", "verdict": "Other"}))
+
+
+def test_image_tab_copy_keeps_the_ten_megabyte_limit():
+    page = Path("app/streamlit_app.py").read_text(encoding="utf-8")
+    assert "image_prompt_html" in page
+    assert "image_too_large" in page
+    assert "image_check_html" in page
+    html = image_prompt_html()
+    sentence = (
+        "Upload a photo of an event (optional caption). "
+        "We check where it first appeared online."
+    )
+    assert sentence in html
+    assert "10 MB" in html
+    assert image_too_large(IMAGE_BYTE_LIMIT) is False
+    assert image_too_large(IMAGE_BYTE_LIMIT + 1) is True
+    config = Path(".streamlit/config.toml").read_text(encoding="utf-8")
+    assert "maxUploadSize = 10" in config

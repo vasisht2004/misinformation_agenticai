@@ -1,0 +1,131 @@
+{
+  "input_type": "image",
+  "caption": "Flooding in Mumbai this morning, 12 November 2026. Share before it is deleted.",
+  "claim": "A photograph shows flooding in Mumbai on 12 November 2026.",
+  "verdict": "Misleading",
+  "refute_kind": "out_of_context",
+  "confidence": 0.81,
+  "priority": "Medium",
+  "provisional": false,
+  "review_status": "",
+  "review_reason": "",
+  "alert_pending_approval": false,
+  "route": "investigate",
+  "match_type": "none",
+  "decision": "store",
+  "gate": "sufficient",
+  "search_status": "ran",
+  "best_match": {},
+  "red_flags": [
+    "Out-of-context image",
+    "Call to forward"
+  ],
+  "explanation": "The photograph was online years before November 2026, and it shows a snowy hill town rather than a flood in Mumbai.",
+  "true_version": "The picture is an older photograph of a snowy hill town, not flooding in Mumbai in November 2026.",
+  "correction_message": "This photo is not Mumbai flooding from November 2026. It is an older picture of a snowy hill town.",
+  "image_path": "placeholder.jpg",
+  "image_consistency": {
+    "consistent": "no",
+    "mismatches": [
+      {
+        "detail": "Place",
+        "observed": "a snowy hill town",
+        "expected": "flooded streets in Mumbai"
+      },
+      {
+        "detail": "Time",
+        "observed": "winter light and bare trees",
+        "expected": "November 2026 monsoon flooding"
+      }
+    ],
+    "place_clues": [
+      "hill town",
+      "snow on roofs"
+    ],
+    "time_clues": [
+      "winter light",
+      "bare trees"
+    ]
+  },
+  "image_provenance": {
+    "vision_status": "ok",
+    "best_guess": [
+      "Snow on a hill town",
+      "Not a coastal flood"
+    ],
+    "first_seen": {
+      "date": "2019-03-12",
+      "url": "https://hillwire.example/2019/03/snow-on-the-ridge",
+      "host": "hillwire.example",
+      "tier": 3
+    },
+    "matches": [
+      {
+        "url": "https://daily-ridge.example/2024/11/old-snow-photo",
+        "host": "daily-ridge.example",
+        "tier": 2,
+        "date": "2024-11-02",
+        "match": "partial",
+        "stance": "refutes",
+        "quote": "The same frame appeared years earlier, after a snowfall, and does not show a flood.",
+        "group_id": "daily-ridge.example"
+      },
+      {
+        "url": "https://metro-desk.example/2026/11/mumbai-rains-photos",
+        "host": "metro-desk.example",
+        "tier": 2,
+        "date": "2026-11-12",
+        "match": "partial",
+        "stance": "supports",
+        "quote": "Readers sent this frame and called it Mumbai flooding.",
+        "group_id": "metro-desk.example"
+      },
+      {
+        "url": "https://hillwire.example/2019/03/snow-on-the-ridge",
+        "host": "hillwire.example",
+        "tier": 3,
+        "date": "2019-03-12",
+        "match": "full",
+        "stance": "neutral",
+        "quote": "Ridge Road after the March snowfall. Shops stayed open.",
+        "group_id": "hillwire.example"
+      },
+      {
+        "url": "javascript:alert(1)",
+        "host": "bad.example",
+        "tier": 4,
+        "date": "",
+        "match": "partial",
+        "stance": "neutral",
+        "quote": "See <script>alert(1)</script> for the file.",
+        "group_id": "bad.example"
+      }
+    ]
+  },
+  "image_memory_hit": {
+    "thread_id": "img-thread-2019",
+    "verdict": "Misleading",
+    "distance": 0.07,
+    "first_seen": "2019-03-12"
+  },
+  "atomic_results": [
+    {
+      "atomic_id": "A1",
+      "explanation": "The photo is older and shows snow.",
+      "refute_kind": "out_of_context"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "E1",
+      "url": "https://daily-ridge.example/2024/11/old-snow-photo",
+      "netloc": "daily-ridge.example",
+      "tier": 2,
+      "stance": "refutes",
+      "quote": "The same frame appeared years earlier, after a snowfall, and does not show a flood.",
+      "passage": "The same frame appeared years earlier, after a snowfall, and does not show a flood.",
+      "group_id": "daily-ridge.example",
+      "date": "2024-11-02"
+    }
+  ]
+}
