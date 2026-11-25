@@ -61,11 +61,11 @@ claims in the same style so they match the memory.
 | 5 Memory | `memory.py` | Vash | Hybrid search over 52,099 past claims: BGE-M3 dense (E @ q) + BM25, merged with Reciprocal Rank Fusion; near-duplicates collapsed into `also_debunked_by`; filters (date_before, domain) | sentence-transformers (BGE-M3), NumPy, rank_bm25, FAISS (parity check) | no |
 | 6 Prior match | `prior_match.py` | Vash | exact / similar / none by thresholds; detail rule (numbers, years, ₹ amounts, names must agree); expiry rule for status claims; route = reuse_prior or investigate | rules | no |
 | 7 Investigate | `investigate.py` | Vash | Fixed plan of at most five queries (neutral, verify, refute, official by domain, lead only after a similar prior) plus one top-up of at most two queries when fewer than two independent tier 1–2 groups support or refute; fetch with an SSRF check; pick passages; stance_v9; credibility (tier of the source, same registrable domain plus MinHash for independence, freshness). A group that both supports and refutes is kept and marked for the gate, which counts it on neither side → evidence E1…En. A later call skips queries already run | Tavily, trafilatura, htmldate, BGE-M3, datasketch, Gemini (stance_v9 and an optional top-up), rules | **1–3 calls** |
-| 9 Gate | `gate.py` | Vash | Rules: ≥2 independent groups agree, ≥1 Tier 1–2, no Tier-1 disagreement → sufficient; credible conflict → human; else search_more (max 2) then insufficient | rules | no |
-| 8+10 Assess | `assess.py` | Vash | One call: per-atomic-claim results, explanation, true_version, correction message, cited evidence IDs only. Code applies the verdict rule, checks citations exist, computes confidence from evidence features | Gemini, rules, (later) logistic-regression calibration | **1 call** |
+| 9 Gate | `gate.py` | Vash | Rules: ≥2 independent groups agree, ≥1 Tier 1–2, no Tier-1 disagreement → sufficient; credible conflict → human; else search_more (max 2) then insufficient. G1, G2R, and G3 are on. A stale official page does not decide alone. The core must match the quote. Photographs use `PHOTO_RULE` | rules | no |
+| 8+10 Assess | `assess.py` | Vash | One call (`assess_v2`): explanations, true_version, correction, cited evidence IDs only. Code applies the verdict, checks citations, and scores confidence. The model's own label is stored as `model_lean` and is not the verdict | Gemini, rules | **1 call** |
 | 11 Priority | `priority.py` | Vash | Score from harm (domain, red flags), novelty (1 − top memory cosine), reach (also_debunked_by / repeat submissions), urgency (deadline words) → High/Medium/Low. Weights hand-set + sensitivity check | rules | no |
 | 12 Decide | `decide.py` | Vash | EVSI-inspired rule: alert / search_more / human / store, using harm-dependent threshold p* = a/(a+bH) | rules | no |
-| 13 Human review | `review.py` | Vash | LangGraph `interrupt()` pauses; Streamlit review queue (approve / edit / reject / more evidence) resumes with `Command(resume=...)` | LangGraph, Streamlit | no |
+| 13 Human review | `review.py` | Vash | Non-blocking. The run finishes and the queue keeps the row. `list_pending`, `apply_review`, and `get_card` are the queue. `HUMAN_BLOCKING` restores the old `interrupt()` pause | LangGraph, Streamlit | no |
 | 14–15 Output | `output.py` | Vash | Result card (verdict, confidence, evidence, seen-before, red flags, true version, correction, limits); alerts page; email/webhook stub | Streamlit | no |
 | 16 Audit | `audit.py` | Vash | One SQLite row per run (input, evidence, verdict, human action, LLM/search calls, latency, model + prompt version); approved verdicts appended to memory | SQLite | no |
 | Wiring | `graph.py` | Vash | LangGraph StateGraph: nodes = boxes, conditional edges at boxes 6, 9, 12; checkpointer (SQLite); recursion limit | LangGraph | — |
@@ -74,6 +74,18 @@ claims in the same style so they match the memory.
 `ingest.py` and `extract.py` must fill their `state.py` fields exactly; extract's domain must be one of `config.DOMAINS`; extract calls the LLM only through `llm.call_structured`; test against `tests/fixtures/sample_state.json`.
 
 Typical cost per claim: **3–6 LLM calls, ~5–7 searches, ~40 s.**
+
+### Rules that are on
+
+- **G1** `GATE_PRIMARY_SOURCE`: one tier-1 page from the office the claim names can support or refute when no tier 1–2 group is on the other side.
+- **G2R** `GATE_WEAK_REFUTE`: three independent lower-tier refutations, and nobody supporting, can refute. The card says no tier 1–2 source was found, and confidence is capped at 0.6. Support is never decided from lower-tier pages alone.
+- **G3** `GATE_SHARED_SOURCE`: two outlets that share a 12-word run are one source.
+- **Stale official:** a tier-1 page older than `STALE_DAYS` (365) does not win by itself against a current page on the other side.
+- **Core match** `TRUE_NEEDS_CORE_MATCH`, mode `relaxed`: a support quote has to carry the core's numbers, dates, name, and action. A paraphrase of the verb counts. A different figure does not.
+- **Language guard:** Latin text that uses ordinary English words stays in scope. `langdetect` is not allowed to drop a short English sentence (it labels "An Aadhaar number has 12 digits" as Afrikaans). Devanagari stays out of scope.
+- **Fact guard:** extract calling a sentence an opinion does not stick when the sentence has a number or a date, a factual verb, and no opinion phrase.
+- **`search_status`:** `ran` (a live call or a cache hit), `cache_only_miss`, `not_needed`, `monthly_cap`, or an error. The card also shows how many searches were live and how many were cached.
+- **Photographs.** `vision.py` calls Google Cloud Vision `WEB_DETECTION` only. EXIF is stripped when the JPEG is written. `webEntities` are ignored. `provenance.py` dates a page and applies `PHOTO_RULE` (`v2`: a partial counts only with a trusted date at least a year before the event in the caption). `image_memory.py` stores the embedding of the extracted claim, not the pixels, and reuses a verdict for the same photograph and the same caption. Out of context is Misleading.
 
 ## 4. State contract (`misinfo_agent/state.py`)
 
@@ -92,6 +104,15 @@ is a complete example used by the UI and tests.
 - Metrics: macro-F1 per verdict class and per domain; Recall@k for memory; citation accuracy;
   calibration (ECE); abstention rate; cost and latency per claim.
 - Ablation: LLM alone → +memory → +web search → full system; plus a "Gemini with search" baseline.
+
+Written reports, all post-hoc where they say so:
+
+- `docs/eval_prior_match.md` — box 6.
+- `docs/eval_investigate.md` — box 7.
+- `docs/eval_end_to_end.md` — the 50-claim run. The blocked column is the honest number.
+- `docs/eval_diagnosis.md` — gate study, established facts, and the image-rule comparison that selected `PHOTO_RULE=v2`.
+- `docs/system_check.md` — one live run of each input type.
+- `docs/runbook.md` — how to run a check and what each card should show.
 
 ## 6. Engineering rules
 

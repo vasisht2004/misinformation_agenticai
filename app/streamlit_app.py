@@ -1169,7 +1169,12 @@ def _chrome(fixture: str) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title=components.APP_NAME, page_icon="✦", layout="wide", initial_sidebar_state="collapsed")
+    st.set_page_config(
+        page_title="Agentic AI System for Misinformation Detection",
+        page_icon="✦",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
     theme.inject()
     _init_state()
     _apply_cache_only()

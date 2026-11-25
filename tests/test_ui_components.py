@@ -28,6 +28,7 @@ from app.components import (
     stepper_html,
     view_model,
     vision_banner_text,
+    wordmark_html,
 )
 from app.theme import CSS
 
@@ -124,7 +125,12 @@ def test_fixtures_cover_the_named_cards():
         html = card_html(model)
         assert html
         assert "<script>" not in html
-    assert APP_NAME == "FACT✦LENS"
+    assert APP_NAME == "AGENTIC AI SYSTEM ✦\nFOR MISINFORMATION DETECTION"
+    mark = wordmark_html()
+    assert "AGENTIC AI SYSTEM" in mark
+    assert "FOR MISINFORMATION DETECTION" in mark
+    assert "fl-star" in mark
+    assert "<br>" in mark
     alert = load_fixture("false_alert")
     assert alert.get("priority") == "High"
     assert alert.get("provisional") is True

@@ -23,7 +23,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 # The wordmark. The star is the one coral character; theme.py colours it.
-APP_NAME = "FACT✦LENS"
+APP_NAME = "AGENTIC AI SYSTEM ✦\nFOR MISINFORMATION DETECTION"
 
 # One source for every figure painted on the page. Do not add a number
 # that is not in these files.
@@ -604,10 +604,10 @@ def view_model(state: dict | None = None, result: dict | None = None) -> dict:
 
 
 def wordmark_html(*, huge: bool = True) -> str:
-    """FACT✦LENS. The star is its own span so the accent colour has one job."""
+    """Two lines. The star is its own span so the coral colour has one job."""
     parts = APP_NAME.split("✦")
     star = "<span class='fl-star'>✦</span>"
-    inner = star.join(esc(part) for part in parts)
+    inner = star.join(esc(part).replace("\n", "<br>") for part in parts)
     kind = "huge" if huge else "small"
     return f"<div class='fl-wordmark {kind}'>{inner}</div>"
 

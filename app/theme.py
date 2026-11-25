@@ -166,13 +166,13 @@ a {{
   position: relative;
   font-family: {_DISPLAY};
   font-weight: 700;
-  letter-spacing: -0.045em;
-  line-height: 0.84;
+  letter-spacing: -0.03em;
+  line-height: 0.95;
   color: #F2F0EA;
   margin: 0;
 }}
 .fl-wordmark.huge {{
-  font-size: clamp(4.4rem, 12vw, 8.4rem);
+  font-size: clamp(1.8rem, 5.2vw, 3.6rem);
 }}
 .fl-wordmark.small {{
   font-size: clamp(2rem, 4vw, 2.6rem);

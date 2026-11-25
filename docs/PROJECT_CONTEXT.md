@@ -48,10 +48,10 @@ One `ClaimState` dict (`misinfo_agent/state.py`) travels through every box. A no
 | 6 Prior match | `prior_match.py` | exact / similar / none. Detail, community, and expiry rules can downgrade exact. A model veto can only turn exact into similar. Route is `reuse_prior` or `investigate`. | 0–1 call, only if the rules left the pair exact |
 | 7 Investigate | `investigate.py` plus `search.py` and `fetch.py` | Fixed query plan, Tavily search, SSRF-checked fetch, passage pick, stance, credibility tiers, independence groups. Optional repair and one top-up. | 1–3 calls (`stance_v9`, `repair_v1`, `topup_v1`) |
 | 9 Gate | `gate.py` | Two independent groups on the same side, at least one tier 1–2, no blocking tier-1 disagreement → sufficient. Credible conflict → human. Else search again (max 2 rounds) then insufficient. | no |
-| 8+10 Assess | `assess.py` | The model drafts explanations. Code picks the verdict, checks citations, and scores confidence. An exact fresh prior is copied from the archive and does not call the model. | 0–1 call (`assess_v1`) |
+| 8+10 Assess | `assess.py` | The model drafts explanations. Code picks the verdict, checks citations, and scores confidence. The model's label is `model_lean` and is not the verdict. An exact fresh prior is copied from the archive and does not call the model. | 0–1 call (`assess_v2`) |
 | 11 Priority | `priority.py` | Harm, novelty, reach, urgency → High / Medium / Low. Style can move this. It cannot move the verdict. | no |
 | 12 Decide | `decide.py` | alert / search_more / human / store. Bar is `p* = a / (a + bH)`. Higher harm, lower bar. | no |
-| 13 Human review | `review.py` | `interrupt()` pauses. Approve, edit, reject, or ask for more evidence. | no |
+| 13 Human review | `review.py` | Non-blocking. The card is written and the row stays on the queue. Approve, edit, or reject updates that finished thread. `HUMAN_BLOCKING` is the old pause. | no |
 | 14–15 Output | `output.py` | Result card. The Streamlit app draws it. | no |
 | 16 Audit | `audit.py` | One SQLite row per finished run. Approved verdicts can be appended for later memory. | no |
 | Wiring | `graph.py` | LangGraph `StateGraph`. | — |
@@ -65,7 +65,9 @@ Box 9 labels each atomic claim: `not_checkable`, `conflicting`, `refuted`, `supp
 
 - Enough evidence: at least two independent groups on the same side, and at least one of them is tier 1 or 2. One credible voice on the other side does not block that, unless it is a large minority or a tier-1 source. A group that both supports and refutes is kept and counted on neither side.
 - A picture claim can be refuted by text. Text cannot confirm what a picture shows.
-- Box 8 then maps the core status. A refuted core is **False** when the draft says the event did not happen (`entirely_false`) and **Misleading** when a real event happened but a detail is wrong (`wrong_detail`). A supported core with a refuted side claim is **Misleading**. A supported core with an unconfirmed side claim stays **True** and the card lists caveats. Insufficient evidence is **Unverifiable** even if the draft says False. A conflicting or failed gate withholds the verdict and sets `needs_human`. A greeting, joke, opinion, or prediction is **Other** and later boxes do not search.
+- Box 8 then maps the core status. A refuted core is **False** when the draft says the event did not happen (`entirely_false`) and **Misleading** when a real event happened but a detail is wrong (`wrong_detail`). A supported core with a refuted side claim is **Misleading**. A supported core with an unconfirmed side claim stays **True** and the card lists caveats. Insufficient evidence is **Unverifiable** even if the draft says False. A conflicting gate does not pick False or True. Review is non-blocking, so the card is Unverifiable and the row waits on the queue. A stance failure is a system error, not "not enough sources". A greeting, joke, opinion, or prediction is **Other**.
+- Gate flags that are on: G1 (`GATE_PRIMARY_SOURCE`), G2R (`GATE_WEAK_REFUTE`), G3 (`GATE_SHARED_SOURCE`), the stale-official guard (`STALE_DAYS` 365), and core match (`TRUE_NEEDS_CORE_MATCH`, relaxed). G4, the evidence score, is off. A Latin sentence with ordinary English words is not dropped because `langdetect` guessed another language. A sentence with a number or a date and a factual verb is not dropped because extract called it an opinion.
+- `search_status` on the card is `ran`, `cache_only_miss`, `not_needed`, `monthly_cap`, or an error, with the live and cached search counts.
 
 Confidence is a logistic over evidence features (group count, tier, agreement, dates, unverified quotes, top-up, extra rounds). On a reused prior it comes from the match cosine. On Unverifiable it is confidence that the claim is unverifiable, not that it is false.
 
@@ -155,11 +157,19 @@ No model. Turns a submission into clean text and a duplicate id.
 
 - Text: Unicode cleanup, strip a "forward to all groups" trailer, lowercase `match_text` so two copies of one forward share a hash. Rupee amounts and numbers are kept.
 - URL: fetch with the same private-address refusal as box 7, strip tracking parameters, read the article with trafilatura, or keep only the Open Graph preview of a social post. Headline and body are stored; `text` is the headline plus about the first 1200 characters of the body.
-- Image: downscale, strip EXIF, write a JPEG named by its sha256 under `data/uploads`, perceptual hash (Hamming distance 6 is the same picture), Tesseract OCR on words scored 60 or above. Video and audio are rejected. Images over the side limit or over 10 MB are rejected.
+- Image: downscale, strip EXIF (the saved JPEG is pixels only, so GPS does not travel with the file), write a JPEG named by its sha256 under `data/uploads`, perceptual hash (Hamming distance 6 is the same picture), Tesseract OCR on words scored 60 or above. Video and audio are rejected. Images over the side limit or over 10 MB are rejected.
 - Language: `langdetect` with seed 0. English proceeds. Hinglish (Latin letters plus a common Hindi word) proceeds with a flag; that word list wins when the detector disagrees. Any other language stops before a model call.
 - Quality: too short (a greeting) or out of scope stops before a model call.
 - Style signals (urgency words, share request, forwarded label, caps ratio, exclamation marks, emoji, authority mentions, conspiracy phrases, certainty words) are warning signs. They feed priority and the card. They are not a verdict.
 - `data/submissions.db` stores a sha256 and a MinHash of the cleaned text, plus an image hash. It does not store the message, a name, or a phone number. The raw string stays in memory for later boxes.
+
+### Photographs
+
+`vision.py` is the only Google Cloud Vision caller. The feature is `WEB_DETECTION`. Face, celebrity, and landmark detection are not requested, and `webEntities` are dropped so a guessed name is not evidence. The cache key is the sha256 of the EXIF-free JPEG.
+
+`provenance.py` fetches the pages Vision returned, dates them (htmldate, the URL, page metadata, or a LinkedIn activity id), and asks one stance call. The event day comes from the caption: "August 2026" is that month, "yesterday" is the day before `claim_date`, and a full date is that day. `PHOTO_RULE` is `v2`. A full match can date the file. A partial counts only when its date is trusted and at least 365 days before the event starts. Out of context is Misleading. A photograph with no caption is Other, and the provenance table is still filled.
+
+`image_memory.py` stores the BGE-M3 embedding of the extracted claim with the perceptual hash. The same photograph and the same caption reuse the stored verdict and skip search. The pixels are not stored. A reused card still attaches provenance from the Vision cache.
 
 ### `extract.py` — boxes 3–4
 
@@ -221,7 +231,7 @@ Rules only. Counts groups box 7 already labelled. Does not re-read the pages. Ou
 
 ### `assess.py` — boxes 8 and 10
 
-One call, `prompts/assess_v1.txt`. The model writes, per atomic claim, an explanation (citations like `[E2]`), a `refute_kind`, a `true_version`, and a `correction_message`. It is told not to pick a verdict and not to add facts that are not in the rows. Code then:
+One call, `prompts/assess_v2.txt`. The model writes, per atomic claim, an explanation (citations like `[E2]`), a `refute_kind`, a `true_version`, and a `correction_message`. It is told not to pick a verdict and not to add facts that are not in the rows. Any label it would have picked is stored as `model_lean` and is not copied into the verdict. Code then:
 
 - picks the verdict from the gate status and, for a refuted core, from `refute_kind`
 - drops any sentence that cites an id the table does not have, or another atomic claim's row
@@ -268,14 +278,14 @@ Live prompts (the version string stored on each call):
 | `stance_v9.txt` | `investigate.py` | Label each passage supports / refutes / neutral, with a quote copied from the passage. |
 | `repair_v1.txt` | `investigate.py` | One repair pass when a reason disagrees with its label. |
 | `topup_v1.txt` | `investigate.py` | At most two extra queries when tier 1–2 groups are thin. |
-| `assess_v1.txt` | `assess.py` | Explanations, true version, correction. No verdict and no self-reported confidence. |
+| `assess_v2.txt` | `assess.py` | Explanations, true version, correction. No verdict and no self-reported confidence. The live assess prompt. |
 | `prompt_v4a.txt` | the archive, not a runtime box | Prompt A that labelled `classified_v2.parquet`: `is_fact_check`, `primary_claim`, `true_version`, verdict, domain, manipulation type, red flags, form. |
 
 Kept for history and for tests that lock a rule to the prompt that introduced it: `extract_v1.txt`, `stance_v1.txt` through `stance_v8.txt`. The live stance file is v9. v4 added tense and "named after". v5 says those rules never turn a refute into neutral. v6 makes a different event neutral. v7 states the share date. v8 and v9 keep those rules and tighten old-evidence and different-event cases.
 
 ## `app/streamlit_app.py`
 
-`streamlit run app/streamlit_app.py`. Three pages in one process: check a claim, the review queue, and run history. The page calls `run_pipeline` and draws the card. It does not score a verdict and it does not search on its own. A busy flag stops a second claim from starting beside a run. BGE-M3 and the memory index load once per process. `RECORD_SUBMISSIONS` stays off unless the sidebar switch is on, because box 11 reads that count as reach. Example forwards are built in (a garlic-cure WhatsApp forward, a metro-and-campus claim, and others). Review actions resume the same thread.
+`streamlit run app/streamlit_app.py`. The title is two lines, "AGENTIC AI SYSTEM" and "FOR MISINFORMATION DETECTION", and the ✦ stays coral. Three pages in one process: check a claim, the review queue, and run history. The page calls `run_pipeline` and draws the card. It does not score a verdict and it does not search on its own. A busy flag stops a second claim from starting beside a run. BGE-M3 and the memory index load once per process. `RECORD_SUBMISSIONS` stays off unless the sidebar switch is on, because box 11 reads that count as reach. Review is non-blocking: the card is shown, and approve / edit / reject updates the finished thread through `apply_review`. `SEARCH_CACHE_ONLY` defaults on in the app so a demo does not spend Tavily.
 
 ## `docs/`
 
@@ -283,6 +293,9 @@ Kept for history and for tests that lock a rule to the prompt that introduced it
 |---|---|
 | `ARCHITECTURE.md` | The design contract. Sections: what the system does, data assets, the 16 boxes, the state contract, the evaluation plan, engineering rules, future work. |
 | `PROJECT_CONTEXT.md` | This file. |
+| `eval_diagnosis.md` | Gate study, the 16 established facts, and the image-rule comparison. `PHOTO_RULE` is `v2` because that comparison said so. |
+| `system_check.md` | One live `run_pipeline` of each input type. |
+| `runbook.md` | How to run a check, and the card each input type should show. |
 | `eval_prior_match.md` | Box 6 numbers. 60-claim test set, 45 text pairs in the 0.80–0.95 band, 25 one-edit negatives. Recall@1 0.950 and Recall@5 1.000 on the 20 paraphrases. Macro-F1 0.903 at 0.85 / 0.70 before the veto. With `KEYTERM_SIM` 0.45 and the LLM veto on, precision of "exact" is 1.0 and false exacts are 0 (22 model calls on that scoring pass). |
 | `eval_investigate.md` | Box 7 on eight claims, 14 Nov 2026, fact-check sites blocked, stance_v3 era. Passage precision@5 82.5% (33/40). Stance accuracy 84% (21/25). Median about 5.5 searches, 2 model calls, 31 seconds. Known limits: absence of evidence is not a refutation; text cannot confirm a picture; tiers are India-centric; the top-up rarely adds a second credible group. |
 | `eval_end_to_end.md` | Written by `scripts/score_eval.py` from the 50-row test set. The allowed-condition numbers in that file are marked superseded (an evaluation-setup bug: the allowed run did not reuse the blocked search cache and then hit the monthly cap). Treat the blocked column as the honest number. On 50 blocked claims: 17 decided, 8 correct, 3-class accuracy 0.471 on decided claims, 3-class macro-F1 0.446, abstention 0.660 (33/50), coverage-adjusted accuracy 0.160. Leak count 0 (the claim's own article, or a near-duplicate, must not appear in memory, leads, or evidence). The baseline is one Gemini call on the claim text alone: 21 decided, 13 correct, abstention 0.580. Definitions, per-class tables, calibration, citation checks, and cost are in that file. |
@@ -396,6 +409,8 @@ pytest -m live                         # spends API credit
 python scripts/run.py --text "..."     # one claim, prints the card
 streamlit run app/streamlit_app.py     # the UI
 ```
+
+What each input should show is in `docs/runbook.md`.
 
 Tesseract must be installed on the machine for image OCR. Without it, image ingest cannot read words off a screenshot.
 
