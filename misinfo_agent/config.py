@@ -9,6 +9,7 @@ Paths are anchored to this file, not to the process cwd. pytest, the CLI and
 an IDE launch from different directories; the parquet files do not move.
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Repo root is the parent of misinfo_agent/. Parents[0] is the package dir.
@@ -30,6 +31,19 @@ SUBMISSIONS_DB = DATA_DIR / "submissions.db"
 # the LangGraph checkpointer would otherwise store every screenshot.
 # Tests point this at a temporary directory. data/ is gitignored.
 UPLOADS_DIR = DATA_DIR / "uploads"
+
+# Same-file memory for photographs. pHash, the verdict, and the embedding
+# of the extracted claim. Tests point this at a temporary file so pytest
+# cannot write the real one.
+IMAGE_MEMORY_DB = DATA_DIR / "image_memory.db"
+# imagehash.phash distance. 6 is the same cutoff ingest uses for a
+# repeat submission: a recompress, not a different photograph.
+IMAGE_MEMORY_HAMMING = 6
+# Caption search on a photograph. Off keeps the image run on provenance:
+# Vision and the page fetch still run, and Tavily is not asked.
+# scripts/run_images.py --no-text-search sets this for an eval that must
+# not spend the monthly search budget. A text claim does not read it.
+IMAGE_TEXT_SEARCH = True
 
 # Off unless a real submission turns it on. scripts/try_claim.py does
 # that with --record. Scoring a claim, and a demo of the pipeline, are
@@ -284,15 +298,61 @@ SEARCH_CACHE = True
 SEARCH_CACHE_DIR = DATA_DIR / "cache" / "search"
 
 # Real Tavily HTTP calls this UTC month. Cached and fake calls do not count.
-# 800 stays under a typical free-tier month with room for the eval. The
-# count file is data/cache/search_monthly_count.json, next to the cache
-# directory so wiping cached pages does not wipe the bill.
-TAVILY_MONTHLY_MAX = 800
+# Tavily dashboard 22 Nov: 709/1000 real credits used; our counter read 800
+# (it over-counts). 1000 = 800 + 200 → leaves ~30 real credits of margin.
+# Revert to 800 on 1 Dec. The count file is
+# data/cache/search_monthly_count.json, next to the cache directory so
+# wiping cached pages does not wipe the bill. The counter itself resets
+# with the UTC month, so the extra 200 is only for the rest of November.
+# A process that imported this before 1 Dec keeps 1000 until it restarts.
+_TAVILY_CAP_REVERTS = datetime(2026, 12, 1, tzinfo=timezone.utc)
+TAVILY_MONTHLY_MAX = 800 if datetime.now(timezone.utc) >= _TAVILY_CAP_REVERTS else 1000
 
 # Real searches one claim may start. The fixed plan is at most 5 queries,
 # so 8 leaves room for a retry without letting one claim spend the month.
 # The counter lives in the process; the caller resets it when a claim starts.
 MAX_SEARCHES_PER_CLAIM = 8
+
+# Google Vision web detection for an event photograph. vision.py is the
+# only module that calls it. 300 is our cap, not Google's. Cached and
+# fake calls do not count. The counter file sits beside this directory
+# so wiping cached detections does not wipe the bill.
+VISION_MONTHLY_MAX = 300
+VISION_CACHE = True
+VISION_CACHE_DIR = DATA_DIR / "cache" / "vision"
+# Pages returned for one photograph. 20 was the first setting. A cached
+# answer from that request does not contain the extra pages, so the cache
+# key includes this number and the photograph is asked again.
+VISION_MAX_RESULTS = 50
+
+# Photo gate. Both on: an earlier or different-event page can refute a
+# picture as out of context, and two full tier 1-2 matches can support
+# it. Off, a picture can still be refuted by text and cannot be confirmed
+# by text, which is the rule these flags sit on top of.
+GATE_PHOTO_CONTEXT = True
+GATE_PHOTO_SUPPORT = True
+# Two provenance groups of any tier can refute a picture when none of
+# them, at any tier, presents the file as this event. The tier 1-2 photo
+# rule is unchanged. The card says no tier 1-2 page was found, and the
+# confidence is capped, because that bar was not met.
+GATE_PHOTO_WEAK_REFUTE = True
+PHOTO_WEAK_REFUTE_CONFIDENCE_CAP = 0.6
+PHOTO_WEAK_REFUTE_CAVEAT = "Lower-tier sources only: no tier 1-2 page was found."
+# A page dated before the claimed event minus this many days is an earlier
+# event. The same window is how close a supporting page has to be to
+# the claim to count as the same occasion: a forward often lands a day
+# or two after the story. The event day comes from the caption, not from
+# today. See provenance.claim_event_date.
+PHOTO_EARLIER_DAYS = 2
+# Which pages may date a photograph.
+# v0: full matches only.
+# v1: full and partial. Two dated-earlier groups, or one tier 1-2 group.
+# v2: v1, but a partial counts only with a trusted date at least
+#     PHOTO_PARTIAL_MIN_DAYS before the event starts.
+# v3: v2, and a tier 1-2 full match of this event blocks out of context.
+# The comparison that picked the value is in docs/eval_diagnosis.md.
+PHOTO_RULE = "v2"
+PHOTO_PARTIAL_MIN_DAYS = 365
 
 # Investigate rounds the gate and the decider may already have used.
 # The first call usually sees 1 (one search finished). While the count
@@ -367,6 +427,98 @@ EXTRA_FACTCHECK_DOMAINS = [
 # comes back on one of them, looks like a fact-check by path or title, or
 # is a PIB Fact Check post. A normal pib.gov.in press release stays.
 BLOCK_FACTCHECK_SITES = False
+
+# A support row counts for the core claim only when its quote carries the
+# core's own key terms: every number, amount, percent, and date the core
+# states, plus the main named entity and the action or status word. A page
+# that confirms a side detail (the fare, the crowd) was being counted as
+# support for the headline. Those rows become neutral for the core and are
+# listed in core_detail_only_ids. With this on, "supported" also needs two
+# independent tier 1-2 groups, not one credible group plus a blog.
+# False restores the older bar exactly: two groups, at least one tier 1-2.
+TRUE_NEEDS_CORE_MATCH = True
+
+# "strict" is the first matcher: the full name, and the exact action word,
+# on the quote alone. "relaxed" is the default because a news sentence
+# paraphrases ("Mamdani won", "Mamdani's win", "Mamdani defeated") and the
+# strict rule was dropping those. Numbers, amounts, percents, and dates
+# still have to match exactly. A drifted figure is a different claim.
+CORE_MATCH_MODE = "relaxed"
+
+# One line per action class. Written from general knowledge of how an
+# English news sentence paraphrases a verb. Not taken from the 50 eval
+# claims or their passages.
+ACTION_SYNONYMS = {
+    "win": ("win", "won", "wins", "winning", "victory", "victorious", "defeated", "beat", "elected"),
+    "ban": ("ban", "banned", "bans", "prohibit", "prohibited", "outlawed"),
+    "launch": ("launch", "launched", "unveil", "unveiled", "introduce", "introduced", "roll out", "rolled out"),
+    "die": ("die", "died", "dead", "death", "killed", "passed away"),
+    "arrest": ("arrest", "arrested", "detained", "held", "taken into custody"),
+    "announce": ("announce", "announced", "declare", "declared", "notified", "notification"),
+    "approve": ("approve", "approved", "approval", "sanction", "sanctioned"),
+    "inaugurate": ("inaugurate", "inaugurated", "inauguration"),
+    "resign": ("resign", "resigned", "resignation", "quit", "stepped down"),
+    "close": ("close", "closed", "closure", "shut", "shutdown"),
+    "open": ("open", "opened", "opening", "reopened"),
+    "issue": ("issue", "issued", "issuance"),
+    "order": ("order", "ordered", "directed", "directive"),
+    "deny": ("deny", "denied", "denial"),
+    "withdraw": ("withdraw", "withdrawn", "scrap", "scrapped", "revoke", "revoked"),
+    "invalid": ("invalid", "invalidated", "void"),
+    "attack": ("attack", "attacked", "assault", "assaulted"),
+    "show": ("show", "shows", "showed", "shown", "footage"),
+    "happen": ("happen", "happened", "occurred", "took place"),
+}
+
+# One tier-1 denial is enough to refute the core when no tier 1-2 group
+# supports it. Two newsrooms were required so a single blog could not
+# convict a claim; a ministry or a regulator is not a blog. The gate
+# reason names the host. False keeps the two-group refute rule.
+TIER1_SINGLE_REFUTE = True
+
+# Gate variants. All default off: the shipped rule stays "two independent
+# groups, at least one tier 1 or 2". A study may turn one on after the
+# selection rule in docs/eval_diagnosis.md has been applied on dev and
+# the winner has been scored once on test. Nothing here is fitted to a
+# claim. G0 in that study is every flag below left off.
+#
+# G2R. Three independent refutations and nobody on the other side can
+# refute the core even when every page is tier 3 or 4. Support is never
+# decided by a pile of lower-tier pages. The card says no tier 1-2 source
+# was found, and the confidence is capped, because the usual bar was not met.
+GATE_WEAK_REFUTE = True
+WEAK_REFUTE_MIN_GROUPS = 3
+WEAK_REFUTE_CONFIDENCE_CAP = 0.6
+WEAK_REFUTE_CAVEAT = "Lower-tier sources only: no tier 1-2 source was found."
+# G1. One tier-1 page from the office the claim is about can support or
+# refute on its own when no tier 1-2 group is on the other side. Any other
+# tier-1 site does not: a ministry page about a different subject is not
+# the body named in the sentence.
+GATE_PRIMARY_SOURCE = True
+# G3. Two outlets that repeat one press release are one source. Merging
+# them makes the gate stricter, not looser. A shared run of this many
+# words is a copied sentence; a shorter overlap is just the same topic.
+GATE_SHARED_SOURCE = True
+GATE_SHARED_QUOTE_WORDS = 12
+# G4. One number per group, summed. Tier weights are a principle: an
+# office is a full vote, a newsroom is close behind, an encyclopaedia is
+# about a third, and an unknown host is a small fraction. They were not
+# fit on the eval. Theta is chosen on dev from the grid and does nothing
+# while the flag is off. 1.0 is the middle of that grid, not a fitted result.
+GATE_EVIDENCE_SCORE = False
+GATE_EVIDENCE_THETA = 1.0
+GATE_EVIDENCE_THETA_GRID = (0.8, 1.0, 1.2, 1.5, 2.0)
+GATE_TIER_WEIGHTS = {1: 1.0, 2: 0.8, 3: 0.35, 4: 0.15}
+
+# True is the old pause: review() calls interrupt() and the process waits.
+# False lets the run finish. The verdict stays provisional, the pending
+# row stays in the queue, and a person approves it later without a re-run.
+HUMAN_BLOCKING = False
+
+# When the rules say Unverifiable, one baseline-style call records which
+# label the model would have picked. It is stored as model_lean. It does
+# not change the verdict, the confidence, the priority, or the decision.
+ASSISTED_LEAN = True
 
 # A passage has to be at least this close to the claim to be kept. 0.45 is
 # a floor to check against the live distribution, not a tuned threshold.
@@ -478,6 +630,22 @@ TIER1_HOSTS = (
     "un.org",
     "imf.org",
     "worldbank.org",
+    # Indian offices that are not under .gov / .nic. A suffix rule never
+    # sees rbi.org.in, npci.org.in, or sansad.in, so a page from the bank,
+    # the payments corporation, or Parliament was scored as an unknown
+    # site. The .gov.in and .nic.in hosts are listed as well so the tier
+    # does not depend on the suffix table alone.
+    "rbi.org.in",
+    "npci.org.in",
+    "uidai.gov.in",
+    "isro.gov.in",
+    "rajbhasha.gov.in",
+    "legislative.gov.in",
+    "indiacode.nic.in",
+    "eci.gov.in",
+    "mea.gov.in",
+    "sebi.gov.in",
+    "sansad.in",
 )
 TIER2_HOSTS = (
     # Wires. PTI's English wire is ptinews.com. ANI, IANS, and UNI are the
@@ -604,12 +772,64 @@ TIER4_HOSTS = (
     "wordpress.com",
 )
 
+# Added to every domain's official query, after that domain's own hosts.
+# A claim such as "how many states does India have" is not filed under one
+# regulator, so the domain lists never asked the census or Know India.
+# PIB is repeated from the domain lists; the query builder drops the copy.
+# This changes searches from here on. The blocked-eval cache was stored
+# before these hosts were added, so a replay of that cache will not show them.
+NATIONAL_OFFICIAL_DOMAINS = (
+    "india.gov.in",
+    "knowindia.india.gov.in",
+    "mha.gov.in",
+    "censusindia.gov.in",
+    "pib.gov.in",
+    "mospi.gov.in",
+)
+
+# The office a claim is about. Used only by the G1 gate flag. A tier-1 host
+# counts as that office when the claim names it. The phrases are the public
+# name of the host, not strings copied from an eval claim. An acronym of
+# three letters or fewer has to appear in that capitalisation: "who" inside
+# "who won" is not the World Health Organization.
+PRIMARY_BODY_NAMES = {
+    "eci.gov.in": ("Election Commission of India", "Election Commission", "ECI"),
+    "pib.gov.in": ("Press Information Bureau", "PIB"),
+    "minorityaffairs.gov.in": ("Ministry of Minority Affairs",),
+    "mod.gov.in": ("Ministry of Defence", "Ministry of Defense"),
+    "mea.gov.in": ("Ministry of External Affairs", "MEA"),
+    "mha.gov.in": ("Ministry of Home Affairs", "MHA"),
+    "ncrb.gov.in": ("National Crime Records Bureau", "NCRB"),
+    "india.gov.in": ("National Portal of India",),
+    "knowindia.india.gov.in": ("Know India",),
+    "censusindia.gov.in": ("Census of India", "Registrar General"),
+    "mospi.gov.in": ("Ministry of Statistics", "MOSPI"),
+    "mohfw.gov.in": ("Ministry of Health", "MoHFW"),
+    "icmr.gov.in": ("Indian Council of Medical Research", "ICMR"),
+    "who.int": ("World Health Organization", "World Health Organisation", "WHO"),
+    "nih.gov": ("National Institutes of Health", "NIH"),
+    "ncbi.nlm.nih.gov": ("PubMed", "NCBI"),
+    "diabetes.org": ("American Diabetes Association",),
+    "idf.org": ("International Diabetes Federation", "IDF"),
+    "ndma.gov.in": ("National Disaster Management Authority", "NDMA"),
+    "mausam.imd.gov.in": ("India Meteorological Department", "IMD"),
+    "rbi.org.in": ("Reserve Bank of India", "RBI"),
+    "sebi.gov.in": ("Securities and Exchange Board of India", "SEBI"),
+    "incometax.gov.in": ("Income Tax Department",),
+    "mib.gov.in": ("Ministry of Information and Broadcasting",),
+    "yas.gov.in": ("Ministry of Youth Affairs and Sports",),
+    "dst.gov.in": ("Department of Science and Technology",),
+    "isro.gov.in": ("Indian Space Research Organisation", "Indian Space Research Organization", "ISRO"),
+    "meity.gov.in": ("Ministry of Electronics and Information Technology", "MeitY"),
+}
+
 # Primary sources for the official query, one tuple per domain. Box 7
 # restricts that one search to these hosts so a ministry page can outrank a
 # blog. PIB is on every list because government denials are posted there,
 # including for domains that have no single regulator. A domain with no
 # entry would skip the official query; all 11 have one. Hosts were checked
 # to answer over HTTPS on 11 Nov 2026 (a few apex names redirect to www).
+# NATIONAL_OFFICIAL_DOMAINS is appended to each tuple at query time.
 OFFICIAL_DOMAINS = {
     "Politics & elections": (
         # Rolls, results, and the model code of conduct.
@@ -639,8 +859,8 @@ OFFICIAL_DOMAINS = {
         "pib.gov.in",
     ),
     "Society & other": (
-        # Catch-all domain: the national portal is the only host that
-        # applies to any of it.
+        # Catch-all domain. The national list added to every official query
+        # supplies the census, home affairs, and Know India on top of these.
         "india.gov.in",
         "pib.gov.in",
     ),

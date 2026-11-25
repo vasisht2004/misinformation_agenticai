@@ -354,3 +354,49 @@ def test_quota_error_propagates():
         assert raised
     finally:
         clear_fake()
+
+
+def test_f01_opinion_with_a_count_is_checkable():
+    # The model called the state count an opinion and returned no claim.
+    # A number plus "has", and no opinion phrase, is a fact. The note is
+    # the record that the code overruled the model.
+    text = "India has 28 states and 8 union territories."
+    set_fake(
+        lambda prompt, schema, images: _claim(
+            checkable=False,
+            not_checkable_reason="opinion",
+            claim="",
+            atomic_claims=[],
+            domain="",
+            red_flags=[],
+        )
+    )
+    try:
+        out = extract(_state(text=text))
+    finally:
+        clear_fake()
+    assert out["checkable"] is True
+    assert out["claim"] == text
+    assert out["atomic_claims"][0]["core"] is True
+    assert "opinion overruled by fact guard" in out["extract_notes"]
+    assert "verdict" not in out or out.get("verdict") != "Other"
+
+
+def test_opinion_marker_is_not_overruled():
+    text = "I think India has 28 states and that is the best count."
+    set_fake(
+        lambda prompt, schema, images: _claim(
+            checkable=False,
+            not_checkable_reason="opinion",
+            claim="",
+            atomic_claims=[],
+            domain="",
+            red_flags=[],
+        )
+    )
+    try:
+        out = extract(_state(text=text))
+    finally:
+        clear_fake()
+    assert out["checkable"] is False
+    assert out["verdict"] == "Other"

@@ -1,0 +1,16 @@
+You compare a photograph with the words that were sent with it. You are not deciding whether the claim is true. An observation here never becomes the verdict by itself. Return only the JSON object the schema asks for.
+
+consistent is "yes" when what is visible fits the caption, "no" when a visible detail contradicts the caption, and "unclear" when you cannot tell. An empty caption has nothing to contradict: answer "unclear" and leave mismatches empty.
+
+mismatches lists each contradiction. detail is the kind of thing (place, time, uniform, script, season). observed is what the photograph shows. expected is what the caption says. Do not invent a city, a date, or a person you cannot see.
+
+place_clues and time_clues are short phrases that are actually visible (a sign, a skyline, snow, daylight). A place or a year you cannot see is not a clue.
+
+CAPTION:
+__CAPTION__
+
+VISUAL DESCRIPTION (written earlier from this same photograph):
+__VISUAL__
+
+CLAIM:
+__CLAIM__

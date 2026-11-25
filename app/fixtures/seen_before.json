@@ -1,0 +1,52 @@
+{
+  "claim": "RBI has announced that all ₹500 notes printed before 2016 will be invalid from 1 December.",
+  "verdict": "False",
+  "confidence": 0.94,
+  "priority": "Medium",
+  "provisional": false,
+  "alert_pending_approval": false,
+  "route": "reuse_prior",
+  "match_type": "exact",
+  "decision": "store",
+  "gate": "skipped",
+  "best_match": {
+    "article_id": "fc-rbi-500-2016",
+    "site": "Alt News",
+    "date": "2016-11-15",
+    "primary_claim": "RBI will discontinue ₹500 notes printed before 2016 from December.",
+    "true_version": "RBI had announced no such deadline for ₹500 notes.",
+    "verdict": "False",
+    "url": "https://www.altnews.in/example-rbi-500-notes-invalid",
+    "domain": "Finance & scams",
+    "dense_cos": 0.94,
+    "also_debunked_by": [
+      {
+        "site": "BOOM",
+        "url": "https://www.boomlive.in/example-rbi-500-notes"
+      }
+    ]
+  },
+  "red_flags": [
+    "Call to forward",
+    "Fake or vague authority"
+  ],
+  "explanation": "Alt News already published this fact-check. The archive verdict is False [C1].",
+  "true_version": "RBI had announced no such deadline for ₹500 notes.",
+  "correction_message": "This notice is fake. There is no 1 December deadline for ₹500 notes.",
+  "citations": [
+    "C1"
+  ],
+  "core_detail_only_ids": [],
+  "evidence": [],
+  "investigate_stats": {
+    "searches": 0,
+    "llm_calls": 0,
+    "queries": [],
+    "seconds": 0
+  },
+  "audit": {
+    "llm_calls": 1,
+    "searches": 0,
+    "latency_s": 2.8
+  }
+}

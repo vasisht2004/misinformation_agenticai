@@ -1,0 +1,84 @@
+{
+  "claim": "India has 29 states in total.",
+  "verdict": "Unverifiable",
+  "confidence": 0.937,
+  "priority": "Low",
+  "provisional": false,
+  "review_status": "none",
+  "alert_pending_approval": false,
+  "unverifiable_reason": "no_credible_record",
+  "search_status": "ran",
+  "model_lean": {
+    "label": "False",
+    "confidence": 0.99
+  },
+  "route": "investigate",
+  "match_type": "none",
+  "decision": "store",
+  "gate": "insufficient",
+  "best_match": {
+    "site": "youturn",
+    "date": "2023-04-21",
+    "primary_claim": "India has 5288 universities, which is the most in the world.",
+    "url": "https://en.youturn.in/factcheck/does-india-have-the-most-number-of-universities-in-the-world",
+    "dense_cos": 0.6761321425437927
+  },
+  "seen_before": {
+    "site": "youturn",
+    "date": "2023-04-21",
+    "link": "https://en.youturn.in/factcheck/does-india-have-the-most-number-of-universities-in-the-world",
+    "claim": "India has 5288 universities, which is the most in the world.",
+    "cosine": 0.6761321425437927,
+    "match_type": "none"
+  },
+  "red_flags": [],
+  "explanation": "India actually comprises 28 states rather than 29 states [E1, E2, E3].",
+  "true_version": "",
+  "what_we_found": "India is a federal union comprising 28 states and 8 union territories [E1].",
+  "correction_message": "We could not find two independent credible sources, so this is not confirmed.",
+  "caveats": [],
+  "citations": ["E1", "E2", "E3"],
+  "core_detail_only_ids": [],
+  "evidence": [
+    {
+      "id": "E1",
+      "url": "https://en.wikipedia.org/wiki/States_and_union_territories_of_India",
+      "netloc": "en.wikipedia.org",
+      "tier": 3,
+      "stance": "refutes",
+      "quote": "India is a federal union comprising 28 states and 8 union territories",
+      "group_id": "G3",
+      "date": ""
+    },
+    {
+      "id": "E2",
+      "url": "https://en.wikipedia.org/wiki/States_and_union_territories_of_India",
+      "netloc": "en.wikipedia.org",
+      "tier": 3,
+      "stance": "refutes",
+      "quote": "India consists of 28 states and 8 union territories",
+      "group_id": "G3",
+      "date": ""
+    },
+    {
+      "id": "E3",
+      "url": "https://testbook.com/question-answer/how-many-states-are-there-in-the-indian-unionas--5f99126635ff7e012af7eba0",
+      "netloc": "testbook.com",
+      "tier": 4,
+      "stance": "refutes",
+      "quote": "At present, there are 28 states in the Indian union.",
+      "group_id": "G1",
+      "date": "2026-10-16"
+    },
+    {
+      "id": "E4",
+      "url": "https://sarkarilist.in/list-of-29-states-of-india",
+      "netloc": "sarkarilist.in",
+      "tier": 4,
+      "stance": "refutes",
+      "quote": "List of 28 States of India",
+      "group_id": "G2",
+      "date": "2019-10-30"
+    }
+  ]
+}

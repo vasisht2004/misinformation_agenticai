@@ -332,6 +332,8 @@ def test_score_counts_abstention_and_citation_failures(tmp_path):
     metrics = score_eval.condition_metrics(joined)
     assert metrics["n"] == 4
     assert metrics["decided"] == 2
+    assert metrics["decided_incl_provisional"] == 3
+    assert metrics["pending_review"] == 1
     assert metrics["correct"] == 1
     assert metrics["abstained"] == 2
     assert metrics["accuracy"] == pytest.approx(0.5)

@@ -44,6 +44,7 @@ from misinfo_agent.search import (
     SearchError,
     SearchQuotaError,
     factcheck_blocked,
+    claim_search_status,
     get_search_usage,
     looks_like_factcheck,
     registrable_domain,
@@ -196,7 +197,7 @@ _RELATIVE_TIME = re.compile(
 )
 # fetch.py's date_source labels when a publication day survived.
 # "untrusted" is the opposite and is not in this set.
-_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text"}
+_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text", "linkedin_id"}
 # A neutral reason that already argues the claim is wrong. These rows
 # are the only ones sent to the repair pass. A cue does not relabel
 # the row by itself. The date window still runs after that pass, so a
@@ -367,23 +368,50 @@ def investigate(state: dict) -> dict:
     fact-check hits, in their own fetch slots, with the phrase rule off.
     It can add a row. It does not drop a row the news search kept.
     """
+    # The status is this call's usage, including a fact-check budget.
+    # search.py already labelled each raise and each cache-only miss.
+    mark = len(get_search_usage())
     if _eval_sites(state) != "allowed":
-        return _investigate_once(state)
-    saved = config.BLOCK_FACTCHECK_SITES
-    try:
-        # On for this half only. An open search of the same words is a
-        # different result list, and the fact-check URLs in it take the
-        # twenty-five hit slots and the twelve fetches. That is why the
-        # allowed run abstained on claims the blocked run had decided.
-        config.BLOCK_FACTCHECK_SITES = True
-        blocked = _investigate_once(state)
-    finally:
-        config.BLOCK_FACTCHECK_SITES = saved
-    # A gate round already has the fact-check rows from the first call.
-    # Running the budget again would search the same plan twice.
-    if _prior_queries(state):
-        return blocked
-    return _append_factchecks(state, blocked)
+        result = _investigate_once(state)
+    else:
+        saved = config.BLOCK_FACTCHECK_SITES
+        try:
+            # On for this half only. An open search of the same words is a
+            # different result list, and the fact-check URLs in it take the
+            # twenty-five hit slots and the twelve fetches. That is why the
+            # allowed run abstained on claims the blocked run had decided.
+            config.BLOCK_FACTCHECK_SITES = True
+            blocked = _investigate_once(state)
+        finally:
+            config.BLOCK_FACTCHECK_SITES = saved
+        # A gate round already has the fact-check rows from the first call.
+        # Running the budget again would search the same plan twice.
+        if _prior_queries(state):
+            result = blocked
+        else:
+            result = _append_factchecks(state, blocked)
+    return _picture_search_status(_attach_search_status(result, get_search_usage()[mark:]))
+
+
+def _attach_search_status(result: dict, rows: list) -> dict:
+    """Copy the rolled-up search status onto the round the gate reads.
+
+    The rows already carry the status search.py set when it raised or
+    when a cache-only miss returned nothing. This does not re-decide it.
+    """
+    report = claim_search_status(rows, needed=True)
+    out = dict(result)
+    out["search_status"] = report["search_status"]
+    out["searches_live"] = report["searches_live"]
+    out["searches_cached"] = report["searches_cached"]
+    stats = out.get("investigate_stats")
+    if isinstance(stats, dict):
+        stats = dict(stats)
+        stats["search_status"] = report["search_status"]
+        stats["searches_live"] = report["searches_live"]
+        stats["searches_cached"] = report["searches_cached"]
+        out["investigate_stats"] = stats
+    return out
 
 
 def _investigate_once(state: dict) -> dict:
@@ -420,18 +448,39 @@ def _investigate_once(state: dict) -> dict:
     stance_failed = False
     search_failed = False
     search_capped = None
+    # A photograph does not spend Tavily unless the caption names an
+    # event and the month still has room. Provenance runs either way.
+    from misinfo_agent.provenance import picture_search_plan
+
+    plan = picture_search_plan(state)
     try:
-        bundle = gather_passages(state, skip_queries=prior_queries)
-        pages = bundle["pages"]
-        passages = list(bundle["passages"])
-        ran.extend(bundle["queries"])
-        search_capped = bundle.get("search_capped")
-        for reason in bundle.get("cap_reasons") or []:
-            notes.append(reason)
-        if search_capped:
-            # The queries that finished before the cap still have pages.
-            # Stance reads those. The note is what the audit and the card show.
-            notes.append(f"search_capped={search_capped}")
+        if plan != "search":
+            if plan == "capped":
+                search_capped = "monthly"
+                notes.append("search_capped=monthly")
+                notes.append(
+                    "Caption search skipped: the monthly search cap is already reached. Provenance still runs."
+                )
+            elif plan == "off":
+                notes.append(
+                    "Text search skipped for this image so the run stays on provenance. Tavily is not asked."
+                )
+            else:
+                notes.append(
+                    "Caption search skipped: the picture has no checkable event to look up. Provenance still runs."
+                )
+        else:
+            bundle = gather_passages(state, skip_queries=prior_queries)
+            pages = bundle["pages"]
+            passages = list(bundle["passages"])
+            ran.extend(bundle["queries"])
+            search_capped = bundle.get("search_capped")
+            for reason in bundle.get("cap_reasons") or []:
+                notes.append(reason)
+            if search_capped:
+                # The queries that finished before the cap still have pages.
+                # Stance reads those. The note is what the audit and the card show.
+                notes.append(f"search_capped={search_capped}")
     except SearchQuotaError as exc:
         notes.append(str(exc))
         search_failed = True
@@ -482,7 +531,8 @@ def _investigate_once(state: dict) -> dict:
     # gate authorised. A failed stance, or a search cap already hit, is
     # also not "thin evidence".
     if (
-        not prior_queries
+        plan == "search"
+        and not prior_queries
         and not stance_failed
         and not search_failed
         and _strong_groups(evidence) < 2
@@ -517,6 +567,22 @@ def _investigate_once(state: dict) -> dict:
     # What is still neutral after the repair and the date window. A row
     # the repair changed, or the window cleared, is no longer a mismatch.
     _mark_reason_mismatches(labelled)
+    picture: dict = {}
+    # First round only. A later round must not append the same pages again,
+    # and a screenshot never reaches this: picture_search_plan already
+    # left those on the text path, and is_event_photo is false for them.
+    if not isinstance(state.get("image_provenance"), dict):
+        from misinfo_agent.provenance import investigate_picture, is_event_photo
+
+        if is_event_photo(state):
+            picture = investigate_picture(
+                state,
+                id_start=_next_evidence_id(list(prior_evidence) + list(evidence)),
+            )
+            evidence = list(evidence) + list(picture.get("evidence") or [])
+            status = (picture.get("image_provenance") or {}).get("vision_status")
+            if status and status not in {"ran", "cached"}:
+                notes.append(f"vision_status={status}")
     stats = _stats(
         passages=passages,
         labelled=labelled,
@@ -535,11 +601,43 @@ def _investigate_once(state: dict) -> dict:
         prior_evidence=prior_evidence,
         search_capped=search_capped,
     )
-    return {
+    result = {
         "passages": [passage.model_dump(mode="json") for passage in passages],
         "evidence": evidence,
         "investigate_stats": stats,
+        "picture_search": plan,
     }
+    if picture.get("image_provenance") is not None:
+        result["image_provenance"] = picture["image_provenance"]
+    if picture.get("image_consistency") is not None:
+        result["image_consistency"] = picture["image_consistency"]
+    return result
+
+
+def _picture_search_status(result: dict) -> dict:
+    """A skipped caption search must not be reported as a search that ran.
+
+    _attach_search_status sees no usage rows and would say "ran". The
+    plan recorded on the result is what actually happened: the month was
+    full, or there was no event to look up. Provenance is unaffected.
+    """
+    plan = result.get("picture_search")
+    if plan not in {"capped", "not_event", "off"}:
+        return result
+    out = dict(result)
+    stats = dict(out.get("investigate_stats") or {})
+    if plan == "capped":
+        out["search_status"] = "monthly_cap"
+        out["search_capped"] = "monthly"
+        stats["search_status"] = "monthly_cap"
+        stats["search_capped"] = "monthly"
+    else:
+        out["search_status"] = "not_needed"
+        stats["search_status"] = "not_needed"
+    out["investigate_stats"] = stats
+    out["searches_live"] = int(out.get("searches_live") or 0)
+    out["searches_cached"] = int(out.get("searches_cached") or 0)
+    return out
 
 
 def _eval_sites(state: dict) -> str:
@@ -720,11 +818,17 @@ def _merge_factchecks(blocked: dict, extra: dict) -> dict:
     refute_groups = {row.get("group_id") for row in evidence if row.get("stance") == "refutes"}
     stats["groups_supporting"] = len(support_groups)
     stats["groups_refuting"] = len(refute_groups)
-    return {
+    out = {
         "passages": passages,
         "evidence": evidence,
         "investigate_stats": stats,
     }
+    # The fact-check budget must not drop the photograph's pages. Those
+    # were gathered on the blocked half and are not in `extra`.
+    for key in ("image_provenance", "image_consistency", "picture_search"):
+        if key in blocked:
+            out[key] = blocked[key]
+    return out
 
 
 def gather_factcheck_hits(
@@ -2502,12 +2606,24 @@ def _without_media(text: str) -> str:
 
 
 def _official_domains(domain) -> list[str] | None:
+    """The domain's own offices, then the national list, without duplicates.
+
+    The national hosts are how a claim that belongs to no single regulator
+    still gets a government page. They are appended, not written into every
+    tuple, so a domain keeps its own order and a host already on that list
+    is not searched twice. An unknown domain still skips the official line.
+    """
     if not isinstance(domain, str):
         return None
     mapping = config.OFFICIAL_DOMAINS.get(domain)
     if not mapping:
         return None
-    return [str(host) for host in mapping]
+    seen: list[str] = []
+    for host in tuple(mapping) + tuple(config.NATIONAL_OFFICIAL_DOMAINS):
+        text = str(host).strip()
+        if text and text not in seen:
+            seen.append(text)
+    return seen
 
 
 def _lead_text(state: dict) -> str | None:

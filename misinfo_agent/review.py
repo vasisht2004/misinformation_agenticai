@@ -39,13 +39,11 @@ _PENDING_COLUMNS = (
     "reason",
 )
 
+# High first, then newest. Medium and Low are not a second sort: a Low
+# that just arrived is ahead of an older Medium. rowid breaks a tie when
+# two pauses share a timestamp.
 _PENDING_ORDER = """
-ORDER BY CASE priority
-    WHEN 'High' THEN 0
-    WHEN 'Medium' THEN 1
-    WHEN 'Low' THEN 2
-    ELSE 3
-END,
+ORDER BY CASE WHEN priority = 'High' THEN 0 ELSE 1 END,
 created_at DESC,
 rowid DESC
 """
@@ -59,6 +57,10 @@ def review(state: dict, *, db_path: Path | str | None = None, thread_id: str | N
     verdict. more_evidence does not change the verdict; the graph
     sends the claim back to investigate while a round is still allowed.
     """
+    # The default lets the run finish. HUMAN_BLOCKING is the old pause:
+    # interrupt() and a person answers before output runs.
+    if not config.HUMAN_BLOCKING:
+        return _review_open(state, db_path=db_path, thread_id=thread_id)
     summary = _summary(state)
     thread = _thread(state, thread_id)
     # Written before the pause, and committed, because interrupt()
@@ -92,7 +94,7 @@ def review(state: dict, *, db_path: Path | str | None = None, thread_id: str | N
         "human_edited": False,
     }
     if action == "approve":
-        return out
+        return {**out, **_settled("approved")}
     if action == "edit":
         # Only the fields the reviewer sent are replaced. A missing
         # verdict keeps the one the evidence rule wrote.
@@ -103,7 +105,7 @@ def review(state: dict, *, db_path: Path | str | None = None, thread_id: str | N
         correction = payload.get("correction")
         if isinstance(correction, str):
             out["correction_message"] = " ".join(correction.split())
-        return out
+        return {**out, **_settled("edited")}
     if action == "more_evidence":
         return out
     # reject, and the unrecognised action above.
@@ -113,6 +115,7 @@ def review(state: dict, *, db_path: Path | str | None = None, thread_id: str | N
     reasons = list(state.get("decision_reasons") or [])
     reasons.append("rejected by reviewer")
     out["decision_reasons"] = reasons
+    out.update(_settled("rejected"))
     return out
 
 
@@ -198,7 +201,148 @@ def list_pending(db_path: Path | str | None = None) -> list[dict]:
             return []
         conn.row_factory = sqlite3.Row
         queried = conn.execute(f"SELECT {', '.join(_PENDING_COLUMNS)} FROM pending_reviews {_PENDING_ORDER}")
-        return [dict(row) for row in queried.fetchall()]
+        return [_public_pending(dict(row)) for row in queried.fetchall()]
+
+
+def _public_pending(row: dict) -> dict:
+    """The queue row the UI reads.
+
+    provisional_verdict stays so older callers still find the label.
+    verdict is the same value under the name the shared interface uses.
+    reason is stored as review_reason.
+    """
+    verdict = row.get("provisional_verdict")
+    return {
+        "thread_id": row.get("thread_id") or "",
+        "claim": row.get("claim") or "",
+        "verdict": verdict,
+        "provisional_verdict": verdict,
+        "confidence": row.get("confidence"),
+        "priority": row.get("priority") or "",
+        "review_reason": row.get("reason") or "",
+        # Older tests and the queue column use this name. review_reason
+        # is the same sentence.
+        "reason": row.get("reason") or "",
+        "created_at": row.get("created_at") or "",
+    }
+
+
+def get_card(
+    thread_id: str,
+    *,
+    checkpoint_path: Path | str | None = None,
+    db_path: Path | str | None = None,
+    additions_path: Path | str | None = None,
+) -> dict:
+    """The stored result card for a finished thread. No re-run."""
+    state = _load_thread(thread_id, checkpoint_path, db_path, additions_path)
+    card = state.get("result")
+    if isinstance(card, dict) and card.get("verdict") is not None or (isinstance(card, dict) and card):
+        return card
+    from misinfo_agent.output import render
+    return render(state)["result"]
+
+
+def apply_review(
+    thread_id: str,
+    action: str,
+    verdict: str | None = None,
+    correction: str | None = None,
+    note: str | None = None,
+    *,
+    checkpoint_path: Path | str | None = None,
+    db_path: Path | str | None = None,
+    additions_path: Path | str | None = None,
+) -> dict:
+    """Record approve, edit, or reject on a finished thread.
+
+    Updates the checkpoint and the audit row. Does not resume the graph
+    and does not call a model. Approve queues the same memory row the
+    blocking path queued.
+    """
+    chosen = str(action or "").strip().lower()
+    if chosen not in {"approve", "edit", "reject"}:
+        raise ValueError("action must be approve, edit, or reject")
+    state = _load_thread(thread_id, checkpoint_path, db_path, additions_path)
+    note_text = " ".join(str(note or "").split())
+    updates = {
+        "human_action": chosen,
+        "human_edited": False,
+        "note": note_text,
+        "provisional": False,
+        "alert_pending_approval": False,
+        "needs_human": False,
+        "human": {
+            "status": "done",
+            "reviewer": "queue",
+            "action": chosen,
+            "note": note_text,
+        },
+    }
+    if chosen == "approve":
+        updates["review_status"] = "approved"
+        updates["review_reason"] = ""
+    elif chosen == "edit":
+        updates["review_status"] = "edited"
+        updates["human_edited"] = True
+        if isinstance(verdict, str) and verdict.strip():
+            updates["verdict"] = verdict.strip()
+        if isinstance(correction, str):
+            updates["correction_message"] = " ".join(correction.split())
+        updates["review_reason"] = ""
+    else:
+        updates["review_status"] = "rejected"
+        updates["verdict"] = "Unverifiable"
+        updates["unverifiable_reason"] = state.get("unverifiable_reason") or "error"
+        updates["note"] = note_text or "rejected by reviewer"
+        updates["human"]["note"] = updates["note"]
+    merged = {**state, **updates}
+    from misinfo_agent.output import render
+    card = render(merged)["result"]
+    updates["result"] = card
+    graph = _graph(checkpoint_path, db_path, additions_path)
+    graph.update_state({"configurable": {"thread_id": thread_id}}, updates)
+    _delete_pending(db_path, thread_id)
+    from misinfo_agent.audit import audit
+    audit(merged, db_path=db_path, additions_path=additions_path)
+    return card
+
+
+def _review_open(state: dict, *, db_path, thread_id: str | None) -> dict:
+    """Write the queue row and keep going. interrupt() is not called."""
+    from misinfo_agent.decide import open_review
+
+    fields = open_review(state)
+    summary = _summary({**state, **fields})
+    summary["why"] = fields.get("review_reason") or ""
+    _write_pending(db_path, _thread(state, thread_id), summary)
+    return fields
+
+
+def _settled(status: str) -> dict:
+    """The pause is over. needs_human follows review_status."""
+    return {
+        "review_status": status,
+        "provisional": False,
+        "alert_pending_approval": False,
+        "needs_human": False,
+    }
+
+
+def _graph(checkpoint_path, db_path, additions_path):
+    from misinfo_agent.graph import build_graph
+    return build_graph(checkpoint_path, db_path, additions_path)
+
+
+def _load_thread(thread_id, checkpoint_path, db_path, additions_path) -> dict:
+    if not str(thread_id or "").strip():
+        raise ValueError("thread_id is required")
+    graph = _graph(checkpoint_path, db_path, additions_path)
+    snap = graph.get_state({"configurable": {"thread_id": thread_id}})
+    values = getattr(snap, "values", None)
+    if not isinstance(values, dict) or not values:
+        raise KeyError(f"no finished thread {thread_id}")
+    return values
 
 
 def _thread(state: dict, thread_id: str | None) -> str:

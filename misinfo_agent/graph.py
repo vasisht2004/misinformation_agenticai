@@ -279,22 +279,29 @@ def _extract(state: dict) -> dict:
 
 
 def _memory(state: dict) -> dict:
+    from misinfo_agent.image_memory import lookup
     from misinfo_agent.memory import get_memory
-    claim = state.get("claim") or state.get("match_text") or ""
-    domain = state.get("domain") or None
-    exclude = _mark(state, "eval_exclude_ids")
-    # date_before is strict, so the source article's own day is already
-    # out. The harness decides which ids to add. The blocked eval passes
-    # the article plus its near-duplicate copies. The allowed eval passes
-    # only the article, so an earlier fact-check of the same rumour can
-    # still be retrieved. A normal check leaves the list unset.
-    hits = get_memory().search(
-        claim,
-        date_before=state.get("claim_date") or None,
-        domains=[domain] if domain else None,
-        exclude_ids=list(exclude) if exclude else None,
-    )
-    return {"matches": hits}
+
+    # An empty photo has nothing to embed. The image hash is the lookup.
+    if state.get("checkable") is False:
+        hits = []
+    else:
+        claim = state.get("claim") or state.get("match_text") or ""
+        domain = state.get("domain") or None
+        exclude = _mark(state, "eval_exclude_ids")
+        # date_before is strict, so the source article's own day is already
+        # out. The harness decides which ids to add. The blocked eval passes
+        # the article plus its near-duplicate copies. The allowed eval passes
+        # only the article, so an earlier fact-check of the same rumour can
+        # still be retrieved. A normal check leaves the list unset.
+        hits = get_memory().search(
+            claim,
+            date_before=state.get("claim_date") or None,
+            domains=[domain] if domain else None,
+            exclude_ids=list(exclude) if exclude else None,
+        )
+    phash = str(state.get("image_phash") or "").strip()
+    return {"matches": hits, "image_memory_hit": lookup(phash) if phash else None}
 
 
 def _prior(state: dict) -> dict:
@@ -310,6 +317,14 @@ def _prior(state: dict) -> dict:
     # merge that treats None as a value, and the card would crash on it.
     if decision.get("best_match") is None:
         decision["best_match"] = {}
+    from misinfo_agent.image_memory import apply_image_reuse
+    from misinfo_agent.provenance import attach_cached_provenance
+
+    decision = apply_image_reuse(state, decision)
+    # The reused verdict skips investigate. The timeline still has to
+    # come from the Vision cache, or the card drops "online since".
+    if decision.get("route") == "reuse_prior" and str(state.get("input_type") or "") == "image":
+        decision.update(attach_cached_provenance(state))
     return decision
 
 
@@ -333,9 +348,15 @@ def _investigate(state: dict) -> dict:
         "passages": passages,
         "investigate_stats": stats,
     }
-    # The cap is a property of the claim, not of the last round. A later
-    # round that searched cleanly must not wipe a cap the first round hit.
-    cap = _prefer_search_cap(state.get("search_capped"), stats.get("search_capped"))
+    # Photograph fields are not reducers. A later round that did not
+    # recompute them must not wipe the first round's pages.
+    for key in ("image_provenance", "image_consistency", "search_status", "searches_live", "searches_cached"):
+        if key in result and result.get(key) is not None:
+            out[key] = result[key]
+    if result.get("search_capped") in {"per_claim", "monthly"}:
+        cap = _prefer_search_cap(state.get("search_capped"), result.get("search_capped"))
+    else:
+        cap = _prefer_search_cap(state.get("search_capped"), stats.get("search_capped"))
     if cap:
         out["search_capped"] = cap
     if int(state.get("rounds") or 0) < 1:
@@ -396,8 +417,13 @@ def _decide(state: dict) -> dict:
 
 
 def _output(state: dict) -> dict:
+    from misinfo_agent.lean import assisted_lean
     from misinfo_agent.output import render
-    return render(state)
+
+    # After review, so a conflict that became Unverifiable can lean.
+    # The lean is a field. render copies it and does not read it as the verdict.
+    extra = assisted_lean(state)
+    return {**extra, **render({**state, **extra})}
 
 
 def _audit(state: dict, db_path: Path, additions_path: Path) -> dict:
@@ -414,9 +440,12 @@ def _after_ingest(state: dict) -> str:
 def _after_extract(state: dict) -> str:
     if _failed(state, "extract"):
         return "review"
-    # Nothing to look up. Assess writes Other and the rest of the
-    # pipeline stores it. Memory would embed an empty claim.
-    if state.get("checkable") is False:
+    # A photograph with no caption is not checkable, and it still needs
+    # provenance so first_seen is filled. A greeting, and a screenshot
+    # of a forward, skip memory the way they always have.
+    from misinfo_agent.provenance import is_event_photo
+
+    if state.get("checkable") is False and not is_event_photo(state):
         return "assess"
     return "memory"
 

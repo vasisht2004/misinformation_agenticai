@@ -10,8 +10,22 @@ from __future__ import annotations
 
 
 def render(state: dict) -> dict:
-    """Build state['result']. Do not re-decide the verdict."""
-    return {"result": _card(state)}
+    """Build state['result']. Do not re-decide the verdict.
+
+    The search status is written here as well as on the card. The output
+    node is the one that always runs, including when the search was not
+    asked (a reused prior, or Other). Investigate has already copied the
+    same rollup onto its own return when a search round happened.
+    """
+    from misinfo_agent.search import resolve_search_status
+
+    report = resolve_search_status(state)
+    return {
+        "search_status": report["search_status"],
+        "searches_live": report["searches_live"],
+        "searches_cached": report["searches_cached"],
+        "result": _card(state, report),
+    }
 
 
 def past_factcheck_heading(match_type: str) -> str:
@@ -27,7 +41,7 @@ def past_factcheck_heading(match_type: str) -> str:
     return "Seen before"
 
 
-def _card(state: dict) -> dict:
+def _card(state: dict, report: dict | None = None) -> dict:
     explanations, parts = _parts(state)
     best = state.get("best_match") if isinstance(state.get("best_match"), dict) else {}
     seen = None
@@ -45,10 +59,29 @@ def _card(state: dict) -> dict:
             "match_type": state.get("match_type") or "",
         }
     marks = state.get("run_marks") if isinstance(state.get("run_marks"), dict) else {}
+    leans = _leans(state)
+    explanation = state.get("explanation") or ""
+    # A conflict has no single verdict. The evidence rows already carry
+    # both stances; this sentence is what the hero shows when assess
+    # left the explanation empty, so neither lean is hidden.
+    if (
+        not explanation
+        and state.get("unverifiable_reason") == "conflicting_credible_sources"
+        and leans["supports"]
+        and leans["refutes"]
+    ):
+        explanation = (
+            "Sources lean both ways. Supports: "
+            + ", ".join(leans["supports"])
+            + ". Refutes: "
+            + ", ".join(leans["refutes"])
+            + "."
+        )
     return {
         "verdict": state.get("verdict"),
         "confidence": state.get("confidence"),
-        "explanation": state.get("explanation") or "",
+        "explanation": explanation,
+        "leans": leans,
         "explanations": explanations,
         # One entry per part, with the core flag. The page badges the
         # main claim from this list. explanations stays the shorter
@@ -70,12 +103,116 @@ def _card(state: dict) -> dict:
         "human_action": state.get("human_action") or "",
         "human_edited": bool(state.get("human_edited")),
         "note": state.get("note") or "",
+        # The UI reads the card, not the checkpoint. These are the review
+        # and the lean. model_lean is never copied into verdict.
+        "needs_human": bool(state.get("needs_human")),
+        "provisional": bool(state.get("provisional")),
+        "review_status": state.get("review_status") or "none",
+        "review_reason": state.get("review_reason") or "",
+        "alert_pending_approval": bool(state.get("alert_pending_approval")),
+        "unverifiable_reason": state.get("unverifiable_reason") or "",
+        "model_lean": state.get("model_lean"),
+        # The page reads the card. A caveat that stays only on the state
+        # never reaches the amber line under the verdict.
+        "caveats": _caveats(state),
+        "search_status": (report or {}).get("search_status") or "",
+        "searches_live": (report or {}).get("searches_live") or 0,
+        "searches_cached": (report or {}).get("searches_cached") or 0,
+        "image_provenance": state.get("image_provenance"),
+        "image_consistency": state.get("image_consistency"),
+        # The UI draws the "online since" line from this. None on a text
+        # claim: there is no photograph to date.
+        "photo_lean": photo_lean(state),
+        "image_memory_hit": state.get("image_memory_hit"),
+        "core_detail_only_ids": list(state.get("core_detail_only_ids") or []),
         "queries": _queries(state),
         # Known here, one step before the audit row. The details section
         # is part of the card. It should still render if that write fails.
         "cost": _cost(state),
         "run_id": str(marks.get("run_id") or ""),
     }
+
+
+def photo_lean(state: dict) -> dict | None:
+    """How long this photograph has been online, from provenance only.
+
+    first_seen_year is the earliest trusted full match. n_sites is
+    distinct registrable domains among those full matches, so www and a
+    subdomain are one site. n_dated_earlier counts full matches whose
+    trusted day is before the claimed event, which is the date rule's
+    own test. A partial is a similar picture: when no full match has a
+    trusted day, similar_since is the earliest partial year and the card
+    says "Similar images seen online since". A text claim has no
+    photograph, so the card field stays empty.
+    """
+    if str(state.get("input_type") or "") != "image":
+        return None
+    from misinfo_agent.provenance import claim_event_date, date_is_trusted, is_dated_earlier
+    from misinfo_agent.search import registrable_domain, site_host
+
+    raw = state.get("image_provenance")
+    provenance = raw if isinstance(raw, dict) else {}
+    matches = [row for row in (provenance.get("matches") or []) if isinstance(row, dict)]
+    seen = provenance.get("first_seen") if isinstance(provenance.get("first_seen"), dict) else {}
+    event = claim_event_date(state)
+    sites = set()
+    earlier = 0
+    partial_years = []
+    for match in matches:
+        kind = str(match.get("match") or "")
+        if kind == "partial":
+            if date_is_trusted(match.get("date_source"), match.get("date")):
+                year = _year(match.get("date"))
+                if year is not None:
+                    partial_years.append(year)
+            continue
+        if kind != "full":
+            continue
+        host = str(match.get("host") or site_host(str(match.get("url") or "")) or "").strip()
+        domain = registrable_domain(host) if host else ""
+        if domain:
+            sites.add(domain.casefold())
+        if is_dated_earlier(match, event):
+            earlier += 1
+    year = _year(seen.get("date"))
+    # Only when this file itself has no trusted day. A full match already
+    # tells the reader when the photograph was online.
+    similar = min(partial_years) if year is None and partial_years else None
+    return {
+        "first_seen_year": year,
+        "n_sites": len(sites),
+        "n_dated_earlier": earlier,
+        "similar_since": similar,
+    }
+
+
+def _year(value):
+    text = str(value or "").strip()
+    if len(text) < 4 or not text[:4].isdigit():
+        return None
+    return int(text[:4])
+
+
+def _leans(state: dict) -> dict:
+    """Hosts on each side. The conflict card names both, not one."""
+    support: list[str] = []
+    refute: list[str] = []
+    seen_support: set[str] = set()
+    seen_refute: set[str] = set()
+    for row in state.get("evidence") or []:
+        if not isinstance(row, dict):
+            continue
+        host = str(row.get("netloc") or row.get("site") or "").strip()
+        if not host:
+            continue
+        stance = str(row.get("stance") or "")
+        if stance == "supports" and host not in seen_support:
+            seen_support.add(host)
+            support.append(host)
+        elif stance == "refutes" and host not in seen_refute:
+            seen_refute.add(host)
+            refute.append(host)
+    return {"supports": support, "refutes": refute}
 
 
 def _parts(state: dict) -> tuple[list[dict], list[dict]]:
@@ -139,6 +276,21 @@ def _evidence(state: dict) -> list[dict]:
             "atomic_id": str(row.get("atomic_id") or "A1"),
         })
     return rows
+
+
+def _caveats(state: dict) -> list[str]:
+    """The strings the card already carries. Empty stays empty."""
+    raw = state.get("caveats")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    found = []
+    for item in raw:
+        text = " ".join(str(item or "").split())
+        if text:
+            found.append(text)
+    return found
 
 
 def _tier(value):

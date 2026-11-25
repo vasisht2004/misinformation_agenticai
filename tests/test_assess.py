@@ -9,9 +9,19 @@ dissenter, fails here.
 
 import pytest
 
+import misinfo_agent.config as config
 from misinfo_agent.assess import assess
 from misinfo_agent.gate import gate
 from misinfo_agent.llm import LLMError, LLMQuotaError, clear_fake, set_fake
+
+
+@pytest.fixture(autouse=True)
+def _old_gate(monkeypatch):
+    # These rows were written for the older count. The new core-match
+    # and single-denial rules have their own tests. Assess is what this
+    # file locks, and it needs the table the draft was written against.
+    monkeypatch.setattr(config, "TRUE_NEEDS_CORE_MATCH", False)
+    monkeypatch.setattr(config, "TIER1_SINGLE_REFUTE", False)
 
 
 @pytest.fixture(autouse=True)
@@ -134,6 +144,36 @@ def test_core_refuted_wrong_detail_is_misleading():
     out = assess(state)
     assert out["verdict"] == "Misleading"
     assert out["needs_human"] is False
+
+
+def test_refute_kind_maps_false_and_misleading():
+    # The main assertion being one wrong fact is False. A side detail,
+    # an old truth, a partial truth, and a quote pulled from somewhere
+    # else are Misleading. Each kind is its own draft.
+    state = _ready(
+        [_refutes(1, "a.com", 1), _refutes(2, "b.com", 2)],
+        [_claim("A1", "The bank opened in 1947.", core=True)],
+    )
+    expected = {
+        "entirely_false": "False",
+        "single_fact_wrong": "False",
+        "wrong_detail": "Misleading",
+        "outdated": "Misleading",
+        "partly_true": "Misleading",
+        "out_of_context": "Misleading",
+    }
+    for kind, verdict in expected.items():
+        _draft(
+            [
+                {
+                    "atomic_id": "A1",
+                    "explanation": "The rows disagree with the claim [E1].",
+                    "refute_kind": kind,
+                }
+            ]
+        )
+        out = assess(state)
+        assert out["verdict"] == verdict, kind
 
 
 def test_supported_core_and_supported_rest_is_true():
@@ -270,12 +310,67 @@ def test_error_gate_withholds_the_verdict():
     state["investigate_stats"] = {"stance_failed": True, "quote_unverified": 0, "topup_used": False}
     state.update(gate(state))
     assert state["gate"] == "error"
-    _draft(
-        [{"atomic_id": "A1", "explanation": "Looks refuted [E1].", "refute_kind": "entirely_false"}]
-    )
+    calls = []
+
+    def fake(prompt, schema, images):
+        calls.append(prompt)
+        return {
+            "atomic": [
+                {
+                    "atomic_id": "A1",
+                    "explanation": "No source we read addressed this part of the claim.",
+                    "refute_kind": "entirely_false",
+                }
+            ],
+            "true_version": "",
+            "correction_message": "No source we read addressed this part of the claim.",
+        }
+
+    set_fake(fake)
     out = assess(state)
+    line = "Checking failed partway through — please run this check again."
     assert out["verdict"] is None
     assert out["needs_human"] is True
+    assert out["explanation"] == line
+    assert out["correction_message"] == line
+    assert out["what_we_found"] == ""
+    assert out["unverifiable_reason"] == "error"
+    assert out["atomic_results"][0]["explanation"] == line
+    assert "No source we read" not in out["explanation"]
+    assert "No source we read" not in out["correction_message"]
+    # The model is not asked. Its sentence would have been the one above.
+    assert calls == []
+
+
+def test_error_gate_with_no_rows_does_not_say_no_source():
+    state = _ready(
+        [],
+        [_claim("A1", "The stance call crashed before any row.", core=True)],
+        rounds=2,
+    )
+    state["investigate_stats"] = {"stance_failed": True, "quote_unverified": 0, "topup_used": False}
+    state.update(gate(state))
+    assert state["gate"] == "error"
+    out = assess(state)
+    line = "Checking failed partway through — please run this check again."
+    assert out["explanation"] == line
+    assert out["correction_message"] == line
+    blob = " ".join(
+        [
+            out["explanation"],
+            out["correction_message"],
+            out["what_we_found"],
+            *(item["explanation"] for item in out["atomic_results"]),
+        ]
+    )
+    assert "No source we read" not in blob
+    from misinfo_agent.output import render
+
+    card = render({**state, **out})["result"]
+    assert card["explanation"] == line
+    assert card["correction_message"] == line
+    assert "No source we read" not in card["explanation"]
+    assert "No source we read" not in card["correction_message"]
 
 
 def test_not_checkable_is_other_and_skips_the_model():

@@ -499,3 +499,70 @@ def test_article_text_keeps_a_date_when_the_host_blocks_the_fetch():
     again = fetch_page(Hit(url=page.url, title="Misleading", content="snippet", raw_content="short"))
     assert again.published_date == "2025-07-15"
     assert again.date_source == "text"
+
+
+def _activity_id(when):
+    """A 19-digit snowflake whose leading 41 bits are this UTC instant."""
+    from datetime import datetime, timezone
+
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    value = (int(when.timestamp() * 1000) << 22) | 0x2A
+    assert value.bit_length() <= 63
+    assert len(str(value)) == 19
+    return str(value)
+
+
+def test_linkedin_activity_id_is_the_date_and_the_page_is_not_fetched():
+    from datetime import datetime, timedelta, timezone
+
+    calls = []
+    # The offline fixture already refuses HTTP. This records a call if
+    # the circulation short-circuit is ever removed.
+    original = fetch._http_get
+
+    def _http(url):
+        calls.append(url)
+        return original(url)
+
+    fetch._http_get = _http
+    try:
+        when = datetime(2020, 6, 15, 12, 0, tzinfo=timezone.utc)
+        activity = _activity_id(when)
+        url = f"https://www.linkedin.com/posts/someone_activity-{activity}-abcd"
+        page = fetch_page(_hit(url, content="the post", published="2019-01-01"))
+        assert page.fetch_status == "circulation"
+        assert page.fetched is False
+        assert page.text == ""
+        assert page.published_date == "2020-06-15"
+        assert page.date_source == "linkedin_id"
+        assert calls == []
+
+        share = f"https://www.linkedin.com/feed/update/urn:li:share:{activity}"
+        assert fetch.linkedin_post_date(share) == "2020-06-15"
+        opened = datetime(2003, 1, 1, tzinfo=timezone.utc)
+        assert fetch.linkedin_post_date(
+            f"https://www.linkedin.com/posts/x_activity-{_activity_id(opened)}-y"
+        ) == "2003-01-01"
+        too_old = datetime(2002, 12, 31, tzinfo=timezone.utc)
+        old_url = f"https://www.linkedin.com/posts/x_activity-{_activity_id(too_old)}-y"
+        old = fetch_page(_hit(old_url, published="2019-04-01"))
+        assert old.published_date == "2019-04-01"
+        assert old.date_source == "tavily"
+        future = datetime.now(timezone.utc) + timedelta(days=3)
+        later = fetch_page(
+            _hit(
+                f"https://www.linkedin.com/posts/x_activity-{_activity_id(future)}-y",
+                published="2018-02-02",
+            )
+        )
+        assert later.date_source == "tavily"
+        assert later.published_date == "2018-02-02"
+        company = "https://www.linkedin.com/company/" + activity
+        assert fetch.linkedin_post_date(company) is None
+        kept = fetch_page(_hit(company, published="2017-03-03"))
+        assert kept.date_source == "tavily"
+        assert kept.published_date == "2017-03-03"
+        assert calls == []
+    finally:
+        fetch._http_get = original

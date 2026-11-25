@@ -1,0 +1,53 @@
+{
+  "claim": "A secret RBI press in Ladakh will replace every ₹500 note next Monday.",
+  "verdict": "Unverifiable",
+  "confidence": 0.42,
+  "priority": "Low",
+  "provisional": false,
+  "alert_pending_approval": false,
+  "unverifiable_reason": "no_credible_record",
+  "model_lean": {
+    "label": "False",
+    "confidence": 0.58
+  },
+  "route": "investigate",
+  "match_type": "none",
+  "decision": "store",
+  "gate": "insufficient",
+  "best_match": {},
+  "red_flags": [
+    "Unverifiable source"
+  ],
+  "explanation": "No two independent credible sources describe a secret press in Ladakh or a Monday replacement of every ₹500 note.",
+  "true_version": "",
+  "what_we_found": "One unnamed blog repeated the forward. That is not a credible record.",
+  "correction_message": "",
+  "citations": [],
+  "core_detail_only_ids": [],
+  "evidence": [
+    {
+      "id": "E1",
+      "url": "https://random-blog.example/rbi-ladakh-press",
+      "netloc": "random-blog.example",
+      "tier": 4,
+      "stance": "neutral",
+      "quote": "A message claims a secret press will replace ₹500 notes.",
+      "passage": "A message claims a secret press will replace ₹500 notes.",
+      "group_id": "random-blog.example",
+      "date": "2024-11-01"
+    }
+  ],
+  "investigate_stats": {
+    "searches": 5,
+    "llm_calls": 1,
+    "queries": [
+      "secret RBI press Ladakh ₹500"
+    ],
+    "seconds": 27.0
+  },
+  "audit": {
+    "llm_calls": 3,
+    "searches": 5,
+    "latency_s": 33.0
+  }
+}

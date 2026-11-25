@@ -132,6 +132,26 @@ def is_abstained(row: dict) -> bool:
     return bool(row.get("needs_human")) or row.get("verdict") == "Unverifiable"
 
 
+def is_provisionally_decided(row: dict) -> bool:
+    """A gradable label, including one a person has not accepted yet.
+
+    The strict column stays is_decided: needs_human false. This one
+    counts False, Misleading, and True even when the review is pending.
+    """
+    return row.get("verdict") in LABELS
+
+
+def is_pending_review(row: dict) -> bool:
+    """A run the queue is still holding.
+
+    review_status is the new flag. Older rows have no such key; a
+    gradable label with needs_human was the old pause.
+    """
+    if row.get("review_status") == "pending":
+        return True
+    return bool(row.get("needs_human")) and row.get("verdict") in LABELS
+
+
 def is_decided(row: dict) -> bool:
     """A label the scorer can mark right or wrong. A pause is not one."""
     return (not row.get("needs_human")) and row.get("verdict") in LABELS
@@ -178,12 +198,15 @@ def condition_metrics(rows: list[dict]) -> dict:
     """One condition. rows already carry the gold label and the domain."""
     abstained = [row for row in rows if is_abstained(row)]
     decided = [row for row in rows if is_decided(row)]
+    provisional = [row for row in rows if is_provisionally_decided(row)]
     correct = [row for row in decided if row.get("verdict") == row.get("label")]
     n = len(rows)
     metrics = {
         "n": n,
         "abstained": len(abstained),
         "decided": len(decided),
+        "decided_incl_provisional": len(provisional),
+        "pending_review": sum(1 for row in rows if is_pending_review(row)),
         "correct": len(correct),
         "accuracy": (len(correct) / len(decided)) if decided else None,
         "abstention": (len(abstained) / n) if n else None,
@@ -608,6 +631,11 @@ def _side_by_side(columns: list[tuple[str, dict]]) -> str:
     specs = [
         ("Scored claims", lambda metrics: str(metrics["n"])),
         ("Decided", lambda metrics: str(metrics["decided"])),
+        (
+            "Decided incl. provisional",
+            lambda metrics: str(metrics.get("decided_incl_provisional", "")),
+        ),
+        ("Pending review", lambda metrics: str(metrics.get("pending_review", ""))),
         ("Correct", lambda metrics: str(metrics["correct"])),
         ("Accuracy, 3-class (decided)", lambda metrics: _rate(metrics["correct"], metrics["decided"])),
         ("Macro-F1, 3-class (decided)", lambda metrics: _num(metrics["macro_f1"])),

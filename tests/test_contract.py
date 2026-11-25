@@ -35,6 +35,9 @@ MODULES = [
     "misinfo_agent.llm",
     "misinfo_agent.search",
     "misinfo_agent.fetch",
+    "misinfo_agent.vision",
+    "misinfo_agent.provenance",
+    "misinfo_agent.image_memory",
     "misinfo_agent.graph",
 ]
 

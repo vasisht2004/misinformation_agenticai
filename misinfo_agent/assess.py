@@ -28,7 +28,13 @@ from pydantic import BaseModel, Field, field_validator
 
 import misinfo_agent.config as config
 from misinfo_agent import gate as gate_box
+from misinfo_agent.gate import PHOTO_OUT_OF_CONTEXT
 from misinfo_agent.llm import LLMError, LLMQuotaError, call_structured
+
+# The sentence a "no" on the photograph adds. The card and the tests
+# share it so a reworded caveat cannot pass one and fail the other.
+CAPTION_MISMATCH = "The photo's details may not match the caption"
+CAPTION_MISMATCH_FLAG = "Image-caption mismatch"
 
 # The archive stores capitalised labels, and the sample fixture stores
 # them in lower case. Both have to land on the same five words the card
@@ -46,13 +52,22 @@ _FROM_ARCHIVE = {
 # date_source values fetch.py keeps when a publication day survived.
 # "untrusted" is the opposite: the only dates on the page were today or
 # in the future, so that row does not count as dated.
-_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text"}
+_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text", "linkedin_id"}
 
 _CITE = re.compile(r"\[(E\d+)\]")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 
 # Shareable lines used only when the model returned nothing usable.
 # They restate the label the rule already chose. They do not add a fact.
+# The draft names the kind. The code names the verdict. A claim whose
+# whole point is one wrong date, number, or name is False: forwarding
+# it forwards the false fact. A real event with a side detail wrong,
+# or a fact that used to be true, is Misleading.
+_FALSE_KINDS = frozenset({"entirely_false", "single_fact_wrong"})
+_MISLEADING_KINDS = frozenset(
+    {"wrong_detail", "outdated", "partly_true", "out_of_context"}
+)
+
 _CORRECTION = {
     "False": "This claim does not match the sources we found. Please do not forward it.",
     "Misleading": "Part of this claim does not match the sources. Please do not forward it as written.",
@@ -60,13 +75,26 @@ _CORRECTION = {
     "Unverifiable": "We could not find two independent credible sources, so this is not confirmed.",
 }
 
+# A stance or model step failed. The table was not finished. The card
+# must not say that no source addressed the claim: that sentence means
+# the web was read and had nothing. The em dash is the wording the card
+# shows, so a test and the UI cannot drift onto a different sentence.
+_CHECK_FAILED = "Checking failed partway through — please run this check again."
+
 
 class _AtomicDraft(BaseModel):
     """One atomic claim, as the model drafted it. Not a verdict."""
 
     atomic_id: str
     explanation: str = ""
-    refute_kind: Literal["entirely_false", "wrong_detail"] | None = None
+    refute_kind: Literal[
+        "entirely_false",
+        "single_fact_wrong",
+        "wrong_detail",
+        "outdated",
+        "partly_true",
+        "out_of_context",
+    ] | None = None
 
     @field_validator("refute_kind", mode="before")
     @classmethod
@@ -157,6 +185,11 @@ def assess(state: dict) -> dict:
             needs_human=False,
         )
 
+    # Before the draft. A failed check must not call the model, and it
+    # must not fall through to the empty-table sentence.
+    if gate_name == "error":
+        return _failed_check(state, notes)
+
     evidence = [row for row in (state.get("evidence") or []) if isinstance(row, dict)]
     draft = _draft(state, evidence, notes)
     explanations, kinds = _per_atomic(state, evidence, draft, notes)
@@ -164,6 +197,11 @@ def assess(state: dict) -> dict:
     # call refuted, that field is the model picking a verdict the table
     # does not support, so it is dropped before the rule reads it.
     kinds = _kinds_for_refuted(state, kinds)
+    # The photo rule already refuted the core. The model's kind would
+    # otherwise call that entirely_false and the verdict would be False.
+    # Out of context is Misleading: the event may be real, the caption is not.
+    if _photo_context(state):
+        kinds[_core_id(state)] = "out_of_context"
     true_version = _guard_claim_text(
         draft.true_version if draft is not None else "",
         evidence,
@@ -185,8 +223,21 @@ def assess(state: dict) -> dict:
         notes,
     )
     confidence = _confidence(state, verdict, core, _core_status(state))
+    # A weak refute is real evidence and not a tier 1-2 record. The cap
+    # is the ceiling for that path even when the logistic would sit higher.
+    # The photo path has its own sentence: a tier 1-2 provenance refute
+    # does not wear it, and is not capped.
+    if _weak_caveat(state) and verdict in {"False", "Misleading"}:
+        confidence = min(confidence, float(config.WEAK_REFUTE_CONFIDENCE_CAP))
+    if _photo_weak_caveat(state) and verdict in {"False", "Misleading"}:
+        confidence = min(confidence, float(config.PHOTO_WEAK_REFUTE_CONFIDENCE_CAP))
     citations = _citations(explanations, true_version, what_we_found)
-    return _pack(
+    # Set on every Unverifiable, including a thin table. A conflict still
+    # has verdict None here; the non-blocking review turns that into
+    # Unverifiable and writes its own reason. Blocking mode keeps None.
+    reason = gate_box.unverifiable_reason(state) if verdict == "Unverifiable" else ""
+    caveats, needs_human, extra_flags = _caption_effects(state, caveats, needs_human)
+    packed = _pack(
         verdict=verdict,
         confidence=confidence,
         explanation=explanations.get(core, ""),
@@ -206,6 +257,43 @@ def assess(state: dict) -> dict:
         ],
         notes=notes,
         needs_human=needs_human,
+        unverifiable_reason=reason,
+    )
+    if extra_flags is not None:
+        packed["red_flags"] = extra_flags
+    return packed
+
+
+def _failed_check(state: dict, notes: list[str]) -> dict:
+    """The card when the gate is a system error.
+
+    explanation and the shareable correction are the same sentence.
+    what_we_found stays empty so the unverifiable template, and the
+    "no source we read" line, cannot be what a person forwards.
+    """
+    notes.append("The gate is a system error, so the card says the check failed.")
+    core = _core_id(state)
+    return _pack(
+        verdict=None,
+        confidence=_confidence(state, None, core, _core_status(state)),
+        explanation=_CHECK_FAILED,
+        true_version="",
+        correction=_CHECK_FAILED,
+        what_we_found="",
+        caveats=[],
+        citations=[],
+        atomic_results=[
+            {
+                "atomic_id": aid,
+                "explanation": _CHECK_FAILED,
+                "refute_kind": None,
+                "citations": [],
+            }
+            for aid in _atomic_ids(state)
+        ],
+        notes=notes,
+        needs_human=True,
+        unverifiable_reason="error",
     )
 
 
@@ -225,15 +313,15 @@ def _verdict(state: dict, kinds: dict[str, str | None], notes: list[str]) -> tup
     core = _core_id(state)
     core_status = _core_status(state)
     kind = kinds.get(core)
-    # The core was refuted, and the draft says the claim is invented
-    # rather than a real event with one wrong detail.
-    if core_status == "refuted" and kind == "entirely_false":
-        return "False", [], False
-    # The core was refuted, and the draft says a real event is under
-    # the wrong date, number, place, or name. Misleading tells a reader
-    # not to forward the wording, without saying the event never happened.
-    if core_status == "refuted" and kind == "wrong_detail":
-        return "Misleading", [], False
+    weak = _weak_caveat(state) + _photo_weak_caveat(state)
+    # entirely_false: the event did not happen. single_fact_wrong: the
+    # claim's main assertion is one date, number, or name, and it is
+    # wrong. Both are False. A side detail, an outdated fact, a partial
+    # truth, or a quote out of context is Misleading.
+    if core_status == "refuted" and kind in _FALSE_KINDS:
+        return "False", weak, False
+    if core_status == "refuted" and kind in _MISLEADING_KINDS:
+        return "Misleading", weak, False
     # Refuted, but the draft never said which kind. False is the harsher
     # label and it needs the explicit entirely_false mark. A missing mark
     # must not become that harsher label by default.
@@ -241,7 +329,7 @@ def _verdict(state: dict, kinds: dict[str, str | None], notes: list[str]) -> tup
         notes.append(
             f"{core} is refuted but refute_kind was missing, so the verdict is Misleading rather than False."
         )
-        return "Misleading", [], False
+        return "Misleading", weak, False
     others = _other_status(state, core)
     # The core and every other checkable part are supported. An empty
     # list of other parts is included: a single supported claim is True.
@@ -460,7 +548,7 @@ def _draft(state: dict, evidence: list[dict], notes: list[str]) -> _Draft | None
             prompt,
             _Draft,
             purpose="assess",
-            prompt_version="assess_v1",
+            prompt_version="assess_v2",
         )
     except LLMQuotaError:
         raise
@@ -472,7 +560,7 @@ def _draft(state: dict, evidence: list[dict], notes: list[str]) -> _Draft | None
 
 
 def _prompt(state: dict, evidence: list[dict]) -> str:
-    template = (config.PROMPTS_DIR / "assess_v1.txt").read_text(encoding="utf-8")
+    template = (config.PROMPTS_DIR / "assess_v2.txt").read_text(encoding="utf-8")
     # replace, not format: the instructions mention JSON braces.
     return (
         template.replace("__CLAIM__", str(state.get("claim") or ""))
@@ -605,6 +693,31 @@ def _kinds_for_refuted(state: dict, kinds: dict[str, str | None]) -> dict[str, s
     }
 
 
+def _photo_context(state: dict) -> bool:
+    """True when the photo rule, not the model, refuted the core."""
+    if _core_status(state) != "refuted":
+        return False
+    return any(PHOTO_OUT_OF_CONTEXT in str(line) for line in (state.get("gate_reasons") or []))
+
+
+def _caption_effects(state: dict, caveats: list, needs_human: bool) -> tuple[list, bool, list | None]:
+    """A caption mismatch is a caveat and a review, never a verdict.
+
+    The verdict argument is whatever the evidence rule already chose.
+    This only adds the sentence, the red flag, and pending review.
+    """
+    raw = state.get("image_consistency")
+    if not isinstance(raw, dict) or raw.get("consistent") != "no":
+        return caveats, needs_human, None
+    updated = list(caveats)
+    if CAPTION_MISMATCH not in updated:
+        updated.append(CAPTION_MISMATCH)
+    flags = [str(item) for item in (state.get("red_flags") or [])]
+    if CAPTION_MISMATCH_FLAG not in flags:
+        flags.append(CAPTION_MISMATCH_FLAG)
+    return updated, True, flags
+
+
 def _settle_text(
     verdict: str | None,
     true_version: str,
@@ -707,6 +820,9 @@ def _from_archive(state: dict, notes: list[str]) -> dict:
     explanation = _cite_archive(_trim(explanation, 59, notes, "explanation"))
     true_version = _cite_archive(_trim(true_version, 49, notes, "true_version"))
     core = _core_id(state)
+    kind = best.get("refute_kind")
+    if kind not in _FALSE_KINDS and kind not in _MISLEADING_KINDS:
+        kind = None
     true_version, correction, what_we_found = _settle_text(
         label,
         true_version,
@@ -728,12 +844,13 @@ def _from_archive(state: dict, notes: list[str]) -> dict:
             {
                 "atomic_id": core,
                 "explanation": explanation,
-                "refute_kind": None,
+                "refute_kind": kind,
                 "citations": ["C1"] if "[C1]" in explanation else [],
             }
         ],
         notes=notes,
         needs_human=needs_human,
+        unverifiable_reason=gate_box.unverifiable_reason(state) if label == "Unverifiable" else "",
     )
 
 
@@ -760,7 +877,12 @@ def _pack(
     notes: list,
     needs_human: bool,
     what_we_found: str = "",
+    unverifiable_reason: str = "",
 ) -> dict:
+    # Defaults for a run that never reaches review. Review overwrites
+    # these when the decision is alert or human and the pause does not
+    # stop the graph. needs_human stays the back-compat flag: pending
+    # means a person has not answered yet.
     return {
         "verdict": verdict,
         "confidence": confidence,
@@ -773,6 +895,12 @@ def _pack(
         "atomic_results": atomic_results,
         "assess_notes": notes,
         "needs_human": needs_human,
+        "provisional": False,
+        "review_status": "pending" if needs_human else "none",
+        "review_reason": "",
+        "alert_pending_approval": False,
+        "unverifiable_reason": unverifiable_reason,
+        "model_lean": None,
     }
 
 
@@ -851,17 +979,48 @@ def _best(state: dict) -> dict:
     return max(hits, key=lambda item: float(item.get("dense_cos") or 0.0))
 
 
+def _photo_weak_caveat(state: dict) -> list[str]:
+    """The lower-tier photo sentence, only when that path decided.
+
+    A tier 1-2 provenance refute does not insert the sentence, so it is
+    not capped and the card does not claim that no such page was found.
+    """
+    if not config.GATE_PHOTO_WEAK_REFUTE:
+        return []
+    needle = config.PHOTO_WEAK_REFUTE_CAVEAT
+    if any(needle in str(item) for item in (state.get("gate_reasons") or [])):
+        return [needle]
+    return []
+
+
+def _weak_caveat(state: dict) -> list[str]:
+    """The lower-tier sentence, only when that path actually decided.
+
+    The flag alone is not enough. A normal two-newsroom refute must not
+    wear this caveat or this cap.
+    """
+    if not config.GATE_WEAK_REFUTE:
+        return []
+    needle = config.WEAK_REFUTE_CAVEAT
+    if any(needle in str(item) for item in (state.get("gate_reasons") or [])):
+        return [needle]
+    return []
+
+
 def _rows_for(state: dict, atomic_id: str) -> list[dict]:
     """The same row filter the gate used, including the leakage switch.
 
     Confidence has to count the rows the verdict was built from. A page
-    the gate ignored as after-claim must not raise the score.
+    the gate ignored as after-claim must not raise the score. Shared-source
+    merging is applied here too, on copies, so the score sees the groups
+    the gate counted.
     """
-    return gate_box._rows(
+    rows = gate_box._rows(
         list(state.get("evidence") or []),
         atomic_id,
         drop_after=bool(config.EVAL_DROP_AFTER_CLAIM),
     )
+    return gate_box.counted_rows(rows)
 
 
 def _stats(state: dict) -> dict:

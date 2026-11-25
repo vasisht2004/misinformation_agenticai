@@ -71,9 +71,9 @@ _NOT_A_SUBJECT = frozenset(
     }
 )
 
-# There is no image memory yet, so a text hit cannot prove two pictures are
-# the same file. "video … shows" and "photo of" are the claim talking about
-# a picture. An old flood photo must not be reused for a new flood.
+# There is no text hash that can prove two pictures are the same file.
+# Image memory does that for a photograph. A text hit is still capped
+# at similar, because the words of an old flood are not this file.
 _PICTURE_CLAIM = re.compile(
     r"\b(photo|image|picture|video|clip|footage)\b.*\b(shows?|of)\b",
     re.IGNORECASE,
@@ -116,6 +116,10 @@ _MONTH_DAY = re.compile(
 # Indian fact-checks write the day first. 01/12/2025 is 1 December, not
 # 12 January. A month above 12 is rejected rather than swapped.
 _NUMERIC_DATE = re.compile(r"\b(\d{1,2})[/\-](\d{1,2})[/\-]((?:19|20)\d{2})\b")
+# ISO writes the year first. 1950-01-26 is 26 January 1950. The day-first
+# pattern does not match a four-digit year in the first place, so this
+# form was left as a bare year plus the numbers 1 and 26.
+_ISO_DATE = re.compile(r"\b((?:19|20)\d{2})-(\d{1,2})-(\d{1,2})\b")
 
 _IDF: dict[str, float] | None = None
 
@@ -460,7 +464,12 @@ def _extract_dates(text: str) -> tuple[list[dict], str]:
     if not text:
         return [], ""
     found = []
-    for pattern, kind in ((_NUMERIC_DATE, "numeric"), (_DAY_MONTH, "day_month"), (_MONTH_DAY, "month_day")):
+    for pattern, kind in (
+        (_ISO_DATE, "iso"),
+        (_NUMERIC_DATE, "numeric"),
+        (_DAY_MONTH, "day_month"),
+        (_MONTH_DAY, "month_day"),
+    ):
         for match in pattern.finditer(text):
             parsed = _interpret_date(kind, match)
             if parsed is not None:
@@ -484,7 +493,9 @@ def _extract_dates(text: str) -> tuple[list[dict], str]:
 
 
 def _interpret_date(kind: str, match: re.Match) -> dict | None:
-    if kind == "numeric":
+    if kind == "iso":
+        year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    elif kind == "numeric":
         day, month, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
     elif kind == "day_month":
         day = int(match.group(1))
@@ -584,8 +595,10 @@ _RS_PREFIX = re.compile(
     r"(?<![A-Za-z])(?:₹|rs\.?|inr)\s*(\d[\d,]*)(?:\.\d+)?",
     re.IGNORECASE,
 )
+# A hyphen is how "2000-rupee" is written. Without it the 2000 is read as
+# a year, and the amount the claim named never matches.
 _RS_WORD = re.compile(
-    r"(?<![A-Za-z\d])(\d[\d,]*)(?:\.\d+)?\s*rupees?\b",
+    r"(?<![A-Za-z\d])(\d[\d,]*)(?:\.\d+)?(?:\s*-?\s*)rupees?\b",
     re.IGNORECASE,
 )
 
@@ -1207,3 +1220,336 @@ def _long_date(value) -> str:
     if parsed is None:
         return ""
     return f"{parsed.day} {parsed.strftime('%B %Y')}"
+
+
+# Status and action words a headline actually asserts. A page that names
+# the person and a different verb ("visited" when the claim says "banned")
+# is about another event. The list is the words the gate already treats as
+# the point of a claim, not every verb in English.
+_ACTION_WORDS = (
+    "banned", "ban", "approved", "approval", "launched", "announced", "announcement",
+    "notification", "inaugurated", "killed", "died", "arrested", "attacked",
+    "resigned", "won", "closed", "opened", "issued", "ordered", "denied",
+    "invalid", "withdrawn", "scrapped", "notified", "shows", "happened",
+)
+
+
+def core_support_matches(quote: str, core: str, *, passage: str = "", mode: str | None = None) -> bool:
+    """True when a support quote is about the core claim, not a side detail.
+
+    mode "strict" is the first rule: the quote alone must contain the full
+    name and every exact action word. mode "relaxed" (the default) allows
+    a surname, an acronym, and a stemmed or synonymous verb, and it may
+    read the passage sentence that contains the quote. Numbers, amounts,
+    percents, and dates use the same exact check in both modes.
+    """
+    import misinfo_agent.config as config
+
+    picked = mode if mode is not None else config.CORE_MATCH_MODE
+    if picked == "relaxed":
+        return _core_support_relaxed(quote, core, passage)
+    return _core_support_strict(quote, core)
+
+
+def _core_support_strict(quote: str, core: str) -> bool:
+    """The original matcher. A paraphrase is not a match."""
+    core_text = str(core or "")
+    quote_text = str(quote or "")
+    if not core_text.strip():
+        return True
+    core_bits = _parse_details(core_text)
+    quote_bits = _parse_details(quote_text)
+    if not _quantities_covered(core_bits, quote_bits):
+        return False
+    entity = _main_entity(core_bits.get("names") or [])
+    # A boundary, not a substring. "A" is a real acronym at the start of
+    # a sentence and must not match the letter inside "checkable".
+    if entity and re.search(rf"\b{re.escape(entity)}\b", quote_text, flags=re.IGNORECASE) is None:
+        return False
+    actions = _action_words(core_text)
+    if actions and any(word not in quote_text.casefold() for word in actions):
+        return False
+    if not quote_text.strip() and (entity or actions or _has_quantity(core_bits)):
+        return False
+    return True
+
+
+def _core_support_relaxed(quote: str, core: str, passage: str) -> bool:
+    """Same numbers as strict. The name and the verb may be paraphrased.
+
+    The window is the quote plus the passage sentence that contains it.
+    A later sentence in the same article is a different fact and is not read.
+    """
+    core_text = str(core or "")
+    if not core_text.strip():
+        return True
+    haystack = _quote_and_sentence(quote, passage)
+    core_bits = _parse_details(core_text)
+    hay_bits = _parse_details(haystack)
+    # Relaxed only. A year-only claim ("in 1950", "in May 2023") is covered
+    # by a full date in that year. The year inside "19 May 2023" is blanked
+    # so it is not also a bare year, and the strict subset check then
+    # misses it. A full date in the claim still has to match day, month,
+    # and year. 1950 does not match 1947. 12 does not match 16.
+    if not _quantities_covered_relaxed(core_bits, hay_bits):
+        return False
+    named = _strip_possessives(haystack)
+    # The longest capital token is often an adjective ("Democratic").
+    # The person is the sentence-initial name plus the surname the
+    # capital-phrase rule kept. Strict still uses the old longest token.
+    entity = _relaxed_entity(core_text)
+    if entity and not _entity_matches(entity, named):
+        return False
+    actions = _action_words(core_text)
+    if actions and any(not _action_satisfied(word, named) for word in actions):
+        return False
+    if not str(quote or "").strip() and (entity or actions or _has_quantity(core_bits)):
+        return False
+    return True
+
+
+def _quantities_covered_relaxed(core_bits: dict, other_bits: dict) -> bool:
+    """Strict figures, plus a bare year covered by a date in that year.
+
+    The date check is unchanged: a claim that names 26 January 1950 still
+    needs that day. Only a year that is not already inside a claim date
+    may be satisfied by the year of a quote date. The number itself still
+    has to be the same number.
+    """
+    years = set(other_bits.get("years") or ())
+    for item in other_bits.get("dates") or []:
+        if isinstance(item, dict) and item.get("year") is not None:
+            years.add(str(item["year"]))
+    widened = dict(other_bits)
+    widened["years"] = years
+    return _quantities_covered(core_bits, widened)
+
+
+def _quantities_covered(core_bits: dict, other_bits: dict) -> bool:
+    """Every core figure is in the other text. An extra figure is allowed.
+
+    ₹, Rs, and "rupees" are the same sign, and commas are not part of the
+    number. "lakh" and "crore" stay on the word-scale path the strict
+    parser already uses, so this check does not grow a second converter.
+    """
+    for kind in ("amounts", "percents", "years", "numbers"):
+        needed = core_bits[kind]
+        if needed and not needed <= other_bits[kind]:
+            return False
+    return _dates_covered(core_bits["dates"], other_bits["dates"])
+
+
+def _quote_and_sentence(quote: str, passage: str) -> str:
+    """The quote, and the one sentence of the passage that contains it."""
+    quote_text = str(quote or "").strip()
+    passage_text = str(passage or "")
+    if not quote_text or not passage_text:
+        return quote_text
+    folded = passage_text.casefold()
+    at = folded.find(quote_text.casefold())
+    if at < 0:
+        return quote_text
+    start = 0
+    for mark in (".", "!", "?"):
+        found = passage_text.rfind(mark, 0, at)
+        if found >= start:
+            start = found + 1
+    end = len(passage_text)
+    for mark in (".", "!", "?"):
+        found = passage_text.find(mark, at + len(quote_text))
+        if found >= 0:
+            end = min(end, found + 1)
+    sentence = passage_text[start:end].strip()
+    if not sentence or sentence.casefold() == quote_text.casefold():
+        return quote_text
+    return f"{quote_text} {sentence}"
+
+
+def _strip_possessives(text: str) -> str:
+    """Mamdani's and Mamdani’s are the name Mamdani."""
+    return re.sub(r"([A-Za-z]+)['’]s\b", r"\1", text or "")
+
+
+# Titles and function words are not a surname. "Dr" is a title. "of" is
+# not the organisation. A last token has to be a name-sized word.
+_NOT_A_SURNAME = frozenset({
+    "mr", "mrs", "ms", "dr", "shri", "sri", "prof", "sir", "smt", "hon",
+    "the", "of", "and", "a", "an", "for", "to",
+})
+
+# Initials a headline uses for an organisation. General knowledge, not
+# read off the eval claims. Generated initials of length 2 are not used:
+# "ZM" would match too many sentences.
+_KNOWN_ACRONYMS = {
+    "rbi": "reserve bank of india",
+    "pib": "press information bureau",
+    "who": "world health organization",
+    "un": "united nations",
+    "isro": "indian space research organisation",
+    # The UPI claim says "NPCI". The PIB page says the long name. The
+    # same table already does this for RBI. Without the pair, a tier-1
+    # quote of the corporation fails the entity check.
+    "npci": "national payments corporation of india",
+    "nasa": "national aeronautics and space administration",
+    "imf": "international monetary fund",
+    "bbc": "british broadcasting corporation",
+}
+
+
+def _entity_matches(entity: str, text: str) -> bool:
+    """Full name, or its last token, or the organisation's acronym."""
+    if _word_in(text, entity):
+        return True
+    parts = [part for part in entity.split() if part]
+    last = parts[-1] if parts else ""
+    if len(last) >= 3 and last.casefold() not in _NOT_A_SURNAME and _word_in(text, last):
+        return True
+    acronym = _acronym(entity)
+    if acronym and _word_in(text, acronym):
+        return True
+    folded = entity.casefold()
+    for short, long in _KNOWN_ACRONYMS.items():
+        if folded == short and _phrase_in(text, long):
+            return True
+        if folded == long and _word_in(text, short):
+            return True
+    return False
+
+
+def _acronym(entity: str) -> str:
+    words = [word for word in entity.split() if word.casefold() not in _NOT_A_SURNAME]
+    letters = "".join(word[0] for word in words if word[:1].isalpha())
+    if len(letters) < 3:
+        return ""
+    return letters
+
+
+def _action_satisfied(word: str, text: str) -> bool:
+    """The same stem, or any word in that action's synonym class.
+
+    A word that sits in a class is not also retried as a bare stem. "won"
+    and "win" do not share a stem, so only the class can join them. A
+    lexicon word that is not in the table still matches on the stem.
+    """
+    import misinfo_agent.config as config
+
+    stem = _stem(word)
+    saw_class = False
+    tokens = re.findall(r"[A-Za-z]+", text or "")
+    for members in config.ACTION_SYNONYMS.values():
+        in_class = any(
+            member.casefold() == word.casefold() or (" " not in member and _stem(member) == stem)
+            for member in members
+        )
+        if not in_class:
+            continue
+        saw_class = True
+        if any(_phrase_in(text, member) for member in members):
+            return True
+        stems = {_stem(member) for member in members if " " not in member}
+        if any(_stem(token) in stems for token in tokens):
+            return True
+    if saw_class:
+        return False
+    return any(_stem(token) == stem for token in tokens)
+
+
+def _stem(word: str) -> str:
+    """Strip one of -s, -ed, -ing, -'s. Not a real stemmer.
+
+    "wins" and "win" meet. "won" and "win" do not, which is why the
+    synonym table lists both. "winning" loses -ing and still needs the
+    table, because the leftover is not "win".
+    """
+    w = (word or "").casefold().replace("’", "'")
+    if w.endswith("'s") and len(w) > 2:
+        w = w[:-2]
+    if len(w) > 5 and w.endswith("ing"):
+        return w[:-3]
+    if len(w) > 4 and w.endswith("ed"):
+        return w[:-2]
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _word_in(text: str, word: str) -> bool:
+    return re.search(rf"\b{re.escape(word)}\b", text or "", flags=re.IGNORECASE) is not None
+
+
+def _phrase_in(text: str, phrase: str) -> bool:
+    return _word_in(text, phrase) if " " not in phrase else re.search(
+        rf"\b{re.escape(phrase)}\b", text or "", flags=re.IGNORECASE
+    ) is not None
+
+
+def _has_quantity(bits: dict) -> bool:
+    return any(bits.get(kind) for kind in ("amounts", "percents", "years", "numbers", "dates"))
+
+
+def _dates_covered(needed: list, found: list) -> bool:
+    """Every core date has a quote date with the same day, month, and year.
+
+    A core date with no year matches a quote date on day and month. A
+    different year is a different occasion, which is the miss this rule
+    exists to catch.
+    """
+    for item in needed or []:
+        if not isinstance(item, dict):
+            continue
+        day, month, year = item.get("day"), item.get("month"), item.get("year")
+        if not any(_same_date(day, month, year, other) for other in found or []):
+            return False
+    return True
+
+
+def _same_date(day, month, year, other: dict) -> bool:
+    if not isinstance(other, dict):
+        return False
+    if other.get("day") != day or other.get("month") != month:
+        return False
+    if year is None:
+        return True
+    return other.get("year") == year
+
+
+def _relaxed_entity(text: str) -> str:
+    """The longest person or organisation phrase in the core.
+
+    A sentence-initial title-case word is not kept by the capital-phrase
+    rule, so "Zohran Mamdani" would otherwise be only "Mamdani", and a
+    later adjective can be the longest token. Gluing that first word back
+    onto the name that follows restores the full name. The last token of
+    that phrase is what a headline is allowed to use on its own.
+    """
+    phrases = list(_capital_phrases(text))
+    raw = (text or "").lstrip()
+    match = re.match(r"([A-Z][a-z]+)(?:\s+)([A-Z][A-Za-z]+)", raw)
+    if match and any(phrase.casefold() == match.group(2).casefold() for phrase in phrases):
+        phrases.append(f"{match.group(1)} {match.group(2)}")
+    best = ""
+    for phrase in phrases:
+        if len(phrase) > len(best):
+            best = phrase
+    return best
+
+
+def _main_entity(names: list) -> str:
+    """The longest capital phrase. Ties keep the first, which is the subject."""
+    best = ""
+    for name in names:
+        text = str(name or "").strip()
+        if len(text) > len(best):
+            best = text
+    return best
+
+
+def _action_words(text: str) -> list[str]:
+    folded = f" {str(text or '').casefold()} "
+    found = []
+    for word in _ACTION_WORDS:
+        if f" {word} " in folded or folded.strip().startswith(word):
+            # "banned" also sits inside "band". Require a boundary.
+            if re.search(rf"\b{re.escape(word)}\b", str(text or ""), flags=re.IGNORECASE):
+                found.append(word)
+    return found

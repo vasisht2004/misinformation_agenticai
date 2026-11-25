@@ -1,4 +1,6 @@
-This repository is an agentic misinformation detector. It retrieves similar fact-checks from a corpus of classified Indian fact-check articles and claim embeddings, then uses a language-model agent to judge whether a new claim is supported, misleading, or unverified.
+This repository is an agentic misinformation detector for Indian content: English text, a link, or an image. The model reads and writes. Evidence and explicit rules decide the verdict. The card says Unverifiable when two independent credible sources cannot be found.
+
+The app title is two lines: AGENTIC AI SYSTEM / FOR MISINFORMATION DETECTION. How to run each input, and the card it should show, is `docs/runbook.md`. The design is `docs/ARCHITECTURE.md`. The map of the repo is `docs/PROJECT_CONTEXT.md`. Eval write-ups are `docs/eval_prior_match.md`, `docs/eval_investigate.md`, `docs/eval_end_to_end.md`, `docs/eval_diagnosis.md`, and `docs/system_check.md`.
 
 The article corpus and embeddings are not stored in git. See DATA.md for the file manifest, checksums, and where to get the shared copies.
 
