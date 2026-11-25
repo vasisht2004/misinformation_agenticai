@@ -75,6 +75,12 @@ _CORRECTION = {
     "Unverifiable": "We could not find two independent credible sources, so this is not confirmed.",
 }
 
+# A stance or model step failed. The table was not finished. The card
+# must not say that no source addressed the claim: that sentence means
+# the web was read and had nothing. The em dash is the wording the card
+# shows, so a test and the UI cannot drift onto a different sentence.
+_CHECK_FAILED = "Checking failed partway through — please run this check again."
+
 
 class _AtomicDraft(BaseModel):
     """One atomic claim, as the model drafted it. Not a verdict."""
@@ -179,6 +185,11 @@ def assess(state: dict) -> dict:
             needs_human=False,
         )
 
+    # Before the draft. A failed check must not call the model, and it
+    # must not fall through to the empty-table sentence.
+    if gate_name == "error":
+        return _failed_check(state, notes)
+
     evidence = [row for row in (state.get("evidence") or []) if isinstance(row, dict)]
     draft = _draft(state, evidence, notes)
     explanations, kinds = _per_atomic(state, evidence, draft, notes)
@@ -251,6 +262,39 @@ def assess(state: dict) -> dict:
     if extra_flags is not None:
         packed["red_flags"] = extra_flags
     return packed
+
+
+def _failed_check(state: dict, notes: list[str]) -> dict:
+    """The card when the gate is a system error.
+
+    explanation and the shareable correction are the same sentence.
+    what_we_found stays empty so the unverifiable template, and the
+    "no source we read" line, cannot be what a person forwards.
+    """
+    notes.append("The gate is a system error, so the card says the check failed.")
+    core = _core_id(state)
+    return _pack(
+        verdict=None,
+        confidence=_confidence(state, None, core, _core_status(state)),
+        explanation=_CHECK_FAILED,
+        true_version="",
+        correction=_CHECK_FAILED,
+        what_we_found="",
+        caveats=[],
+        citations=[],
+        atomic_results=[
+            {
+                "atomic_id": aid,
+                "explanation": _CHECK_FAILED,
+                "refute_kind": None,
+                "citations": [],
+            }
+            for aid in _atomic_ids(state)
+        ],
+        notes=notes,
+        needs_human=True,
+        unverifiable_reason="error",
+    )
 
 
 def _verdict(state: dict, kinds: dict[str, str | None], notes: list[str]) -> tuple:

@@ -139,6 +139,7 @@ def _one(row: dict, mode: str) -> dict:
             "vision_status": provenance.get("vision_status"),
             "n_matches": len(provenance.get("matches") or []),
             "first_seen": provenance.get("first_seen"),
+            "photo_lean": card.get("photo_lean"),
             "search_status": card.get("search_status"),
             "thread_id": outcome.get("thread_id") if isinstance(outcome, dict) else "",
         }
@@ -342,7 +343,13 @@ def _print_detail(state: dict) -> None:
     seen = provenance.get("first_seen") if isinstance(provenance.get("first_seen"), dict) else {}
     print(f"vision_status {provenance.get('vision_status')}", flush=True)
     print(f"matches full={counts['full']} partial={counts['partial']} page={counts['page']}", flush=True)
-    print(f"first_seen date={seen.get('date')} host={seen.get('host')} tier={seen.get('tier')}", flush=True)
+    print(
+        f"first_seen date={seen.get('date')} source={seen.get('date_source')} "
+        f"host={seen.get('host')} tier={seen.get('tier')}",
+        flush=True,
+    )
+    wayback_n = sum(1 for match in matches if match.get("date_source") == "wayback")
+    print(f"wayback_dates {wayback_n}", flush=True)
     evidence = [
         row
         for row in (state.get("evidence") or [])
@@ -370,7 +377,6 @@ def _print_detail(state: dict) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
-    use_fresh_image_memory()
     apply_run_options(no_text_search=args.no_text_search)
     if not CSV_PATH.is_file():
         raise SystemExit(f"missing {CSV_PATH}")
@@ -380,15 +386,21 @@ def main() -> None:
     print(f"vision_calls_before {calls_this_month()}", flush=True)
     print(f"tavily_calls_before {searches_this_month()}", flush=True)
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    for row in rows:
-        file_name = (row.get("file") or "").strip()
-        if not file_name:
-            continue
-        for mode in modes_for(args.sites):
+    # Mode first, and a new image-memory file for each mode. The allowed
+    # pass must not reuse the verdict the blocked pass just stored for
+    # the same photograph: that would make the two columns the same
+    # decision. A later image in one mode still cannot see another run's
+    # database. use_fresh_image_memory replaces the path for this process.
+    for mode in modes_for(args.sites):
+        use_fresh_image_memory()
+        apply_mode(mode)
+        for row in rows:
+            file_name = (row.get("file") or "").strip()
+            if not file_name:
+                continue
             if (file_name, mode) in done:
                 print(f"skip {mode} {file_name}", flush=True)
                 continue
-            apply_mode(mode)
             record = _one(row, mode)
             with OUT_PATH.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")

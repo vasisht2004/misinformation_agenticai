@@ -145,12 +145,47 @@ def test_web_entities_are_ignored(tmp_path):
             "url": "https://www.bbc.com/news/kerala-flood",
             "title": "Kerala floods",
             "match": "full",
+            "image_urls": ["https://cdn.example/a.jpg"],
         }
     ]
     blob = str(found)
     assert "Narendra Modi" not in blob
     assert "webEntities" not in found
     assert calls_this_month() == 0
+
+
+def test_partial_file_urls_are_not_kept(tmp_path):
+    """A partial is a different photograph. Its file URL must not be dated as this one."""
+    set_fake(
+        lambda image: {
+            "responses": [
+                {
+                    "webDetection": {
+                        "pagesWithMatchingImages": [
+                            {
+                                "url": "https://www.bbc.com/news/kerala-flood",
+                                "pageTitle": "Kerala floods",
+                                "fullMatchingImages": [{"url": "https://cdn.example/a.jpg"}],
+                                "partialMatchingImages": [{"url": "https://cdn.example/other.jpg"}],
+                            },
+                            {
+                                "url": "https://blog.example/lookalike",
+                                "pageTitle": "Similar",
+                                "partialMatchingImages": [{"url": "https://cdn.example/other.jpg"}],
+                            },
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    try:
+        found = detect(str(_jpeg(tmp_path)))
+    finally:
+        clear_fake()
+    assert found["pages"][0]["image_urls"] == ["https://cdn.example/a.jpg"]
+    assert "image_urls" not in found["pages"][1]
+    assert "other.jpg" not in str(found["pages"])
 
 
 def test_request_asks_only_for_web_detection():

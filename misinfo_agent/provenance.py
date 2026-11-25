@@ -34,11 +34,16 @@ _SCREENSHOT_WORDS = 40
 # The same sources fetch.py keeps when a publication day survived.
 # "untrusted" is a stamp of today, not a day the page was published.
 # linkedin_id is the activity clock, decoded without opening the post.
-_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text", "linkedin_id"}
+# wayback is an existed_by day from the earliest public capture, not a
+# byline. It is trusted because the archive recorded the URL, and the
+# caller only keeps it when the page has no trusted day or the capture
+# is earlier. It is never allowed to move a day forward.
+_TRUSTED_DATE = {"htmldate", "url", "trafilatura", "tavily", "page", "text", "linkedin_id", "wayback"}
 # A partial is only "this file, long ago" when the date came from the
-# page itself. A missing source is not that. trafilatura, the page, and
-# the article text are the metadata the comparison calls "metadata".
-_PARTIAL_TRUSTED = {"htmldate", "url", "trafilatura", "page", "text", "linkedin_id"}
+# page itself or from that capture. A missing source is not that.
+# trafilatura, the page, and the article text are the metadata the
+# comparison calls "metadata".
+_PARTIAL_TRUSTED = {"htmldate", "url", "trafilatura", "page", "text", "linkedin_id", "wayback"}
 _MONTH_YEAR = re.compile(
     r"\b(january|february|march|april|may|june|july|august|september|october|november|december|"
     r"jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\s+((?:19|20)\d{2})\b",
@@ -254,6 +259,9 @@ def _provenance(state: dict, found: dict, *, id_start: int, label_stance: bool =
         return _provenance_dict(status, [], None, best_guess), []
     chosen = _choose_pages(found.get("pages") or [])
     fetched = _fetch_pages(chosen)
+    # The capture can only move a day backward, and only before the
+    # stance call. _mark_earlier then reads the day that survived.
+    apply_wayback(fetched)
     # An earlier trusted date is the refute. The stance call is not asked
     # about those pages: the model cannot talk a date forward.
     _mark_earlier(state, fetched)
@@ -307,7 +315,15 @@ def _choose_pages(pages: list) -> list[dict]:
         kind = str(row.get("match") or "page")
         if kind not in rank:
             kind = "page"
-        kept.append({"url": url, "title": title, "match": kind})
+        # File URLs travel with a full match only. apply_wayback asks
+        # the archive about them. A partial's file is a different photo.
+        images = []
+        if kind == "full":
+            for item in row.get("image_urls") or []:
+                text = str(item or "").strip()
+                if text.lower().startswith(("http://", "https://")) and text not in images:
+                    images.append(text)
+        kept.append({"url": url, "title": title, "match": kind, "image_urls": images})
         if len(kept) >= 12:
             break
     return kept
@@ -340,6 +356,7 @@ def _fetch_pages(pages: list[dict]) -> list[dict]:
                 "date": published,
                 "date_source": getattr(fetched, "date_source", None),
                 "host": site_host(page["url"]),
+                "image_urls": list(page.get("image_urls") or []),
             }
         )
     return rows
@@ -720,6 +737,55 @@ def earlier_quote(page_date: date, event: date) -> str:
     )
 
 
+def apply_wayback(pages: list[dict]) -> None:
+    """Set an existed_by day from the earliest Wayback capture.
+
+    Full and partial page URLs are asked. A full match also asks about
+    the image-file URLs Vision listed on that page: the file can have
+    been saved before the article. A page-level hit is not asked. It is
+    not this photograph.
+
+    The capture replaces the page's day only when that day is missing or
+    untrusted, or when the capture is strictly earlier. A later capture
+    is ignored. Wayback must not make a known day later, and an equal
+    day keeps the page's own source: the capture did not teach an
+    earlier date.
+    """
+    from misinfo_agent import wayback
+
+    if not wayback.ENABLED:
+        return
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        kind = str(page.get("match") or "")
+        if kind not in {"full", "partial"}:
+            continue
+        # Partials are the lookalikes. The re-run turns this off when a
+        # gold-True photograph was called false on the strength of one.
+        if kind == "partial" and not wayback.DATE_PARTIALS:
+            continue
+        urls = []
+        page_url = str(page.get("url") or "").strip()
+        if page_url:
+            urls.append(page_url)
+        if kind == "full":
+            for item in page.get("image_urls") or []:
+                text = str(item or "").strip()
+                if text and text not in urls:
+                    urls.append(text)
+        found = wayback.earliest(urls)
+        if found is None:
+            continue
+        own = None
+        if date_is_trusted(page.get("date_source"), page.get("date")):
+            own = _iso(page.get("date"))
+        if own is not None and found >= own:
+            continue
+        page["date"] = found.isoformat()
+        page["date_source"] = "wayback"
+
+
 def _mark_earlier(state: dict, pages: list[dict]) -> None:
     """Set the refute on pages the date already decides.
 
@@ -762,6 +828,10 @@ def _first_seen(matches: list[dict]) -> dict | None:
         "url": match.get("url") or "",
         "host": match.get("host") or "",
         "tier": match.get("tier"),
+        # wayback when the capture is what placed the file. The card's
+        # year is this date. The source is how a reader tells a byline
+        # from an archive capture.
+        "date_source": match.get("date_source"),
     }
 
 

@@ -48,9 +48,9 @@ A screenshot under 40 OCR words is also sent to Vision. That call found no pages
 
 ## Photo and caption
 
-Upload the photograph and type the caption. Vision uses the cache when the same JPEG was seen before. `PHOTO_RULE` is `v2`: a full match can date the file, and a partial counts only with a trusted date at least a year before the event named in the caption. "August 2026" is that month, not today. Out of context is Misleading.
+Upload the photograph and type the caption. Vision uses the cache when the same JPEG was seen before. `PHOTO_RULE` is `v2`: a full match can date the file, and a partial counts only with a trusted date at least a year before the event named in the caption. "August 2026" is that month, not today. Out of context is Misleading. Wayback dating is off. When it is on, an earlier CDX capture can supply the "online since" year, and it cannot move a page's own date later.
 
-img09 with its Assam-flood caption reused the stored Misleading verdict (same photo, same caption) and attached provenance from the Vision cache. first_seen was 2026-07-27.
+img09 with its Assam-flood caption, on a fresh image memory, was Unverifiable. Vision was cached. first_seen was 2026-07-27 on english.factcrescendo.com, from the page date (htmldate), and the line was "This photo has been online since at least 2026 (1 sites)". That year is not a Wayback capture.
 
 ## Photo, no caption
 
@@ -72,4 +72,4 @@ Approve keeps the verdict and sets `review_status` to approved. The row leaves t
 
 ## What a card always has
 
-Verdict, confidence, explanation, citations or the reason there are none, `search_status`, and the live and cached search counts. An image card also has provenance and, when a full match has a trusted date, the "online since" line. `model_lean` is labelled as a guess and is not the verdict.
+Verdict, confidence, explanation, citations or the reason there are none, `search_status`, and the live and cached search counts. An image card also has provenance and, when a full match has a trusted date, the "online since" line. `model_lean` is labelled as a guess and is not the verdict. When the gate is `error` (a stance or model step failed), the explanation and the correction say "Checking failed partway through — please run this check again." They do not say that no source addressed the claim.

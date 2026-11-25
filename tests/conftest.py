@@ -83,6 +83,18 @@ def _offline_llm(request, monkeypatch, tmp_path):
         raise RuntimeError("offline test tried to fetch a page")
 
     monkeypatch.setattr("misinfo_agent.fetch._http_get", _refuse_fetch)
+    # Wayback uses that same client. Replacing existed_by is what keeps
+    # a provenance test off DNS: the real lookup checks the target
+    # address before it reads. The cache is a temp dir so a live capture
+    # cannot date a fixture. _read_public is the second wall, for a test
+    # that puts the real lookup back and forgets to stub the client.
+    monkeypatch.setattr("misinfo_agent.wayback.CACHE_DIR", tmp_path / "wayback")
+    monkeypatch.setattr("misinfo_agent.wayback.existed_by", lambda url: None)
+
+    def _refuse_wayback(*args, **kwargs):
+        raise RuntimeError("offline test tried to query the wayback")
+
+    monkeypatch.setattr("misinfo_agent.wayback._read_public", _refuse_wayback)
     # Vision is the third gateway. A key in .env must not turn pytest
     # into a web-detection session, and the monthly file is the real bill.
     monkeypatch.delenv("GOOGLE_VISION_API_KEY", raising=False)

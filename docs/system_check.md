@@ -36,4 +36,20 @@ No case raised. No case was a clear code bug, so nothing was changed and none wa
 - A PIB page fetched without JavaScript returns the fallback body. The headline can still be enough, as it was here, but a release whose title does not state the claim would have little text to extract.
 - Image memory reuses a stored photo verdict. img09 did not investigate again.
 - On the 16-image blocked comparison, `PHOTO_RULE=v2` makes one correct decision (img15) and abstains on the other 15. A September page does not refute an August caption. img05 and img07, both gold True, stay Unverifiable.
+- Wayback dating is off. It called img04 and img06 Misleading. See `docs/eval_diagnosis.md`.
+
+## Re-run of d and e (fresh image memory)
+
+25 November 2026. Streamlit was not started. A new image-memory file, so neither row reused a stored verdict. Caption search was left off so this pass did not add to Tavily, which was already at 988. Vision cap was held at 18. Both reads were cache hits. Wayback dating was already off.
+
+| Case | Verdict | search_status | vision_status | Photo line | Result |
+| --- | --- | --- | --- | --- | --- |
+| d. img09 with its caption | Unverifiable | not_needed | cached | This photo has been online since at least 2026 (1 sites) | FAIL for a Wayback year |
+| e. img04 with no caption | Other | not_needed | cached | none | FAIL for a Wayback year |
+
+**d.** 12 pages. first_seen is 2026-07-27 on english.factcrescendo.com, date source htmldate, one site. The line is that year. It is the page's own date, not a Wayback capture. The verdict is Unverifiable because the memory file was empty, so the earlier Misleading reuse did not apply. Latency 144.35s.
+
+**e.** Other. 8 pages. No trusted date on a full match, so first_seen is empty and the card has no "online since" line. Latency 5.64s.
+
+Vision after: 18. Tavily after: 988. No new call on either counter.
 - "The Reserve Bank of India was established in 1935" is True on a cache-only rerun (4 cached searches, 0 live, rbi.org.in and pib.gov.in). An earlier demo card was Unverifiable because the stance call failed and the empty table was described as "no source we read addressed this part." That was a system failure, not a missing page and not a gate rule. The retry did not need a code change.

@@ -759,3 +759,40 @@ v1 fails step 1 because it calls img05 Misleading. v0, v2, and v3 do not. v2 and
 
 The allowed table keeps a fact-check page at neutral when the blocked re-run never stored a stance for it. A cache-only smoke of img01, with fact-check pages allowed, reads thequint.com. The page is dated 2026-09-07, which is not before August 2026, so n_dated_earlier stays 0. The stance on that page is what fires out of context. Vision stayed at 17 and Tavily stayed at 895.
 
+## IMAGE SET + WAYBACK DATING
+
+Post-hoc, same 16 images, `PHOTO_RULE` left at `v2`. `scripts/run_images.py --no-text-search`. Vision was cache only: the monthly cap was set to the count already on the file, so a miss could not open a live call. Vision stayed at 18. Before is the v2 column above. 2-class treats True as true and both False and Misleading as not-true. Unverifiable is abstained.
+
+The stored Vision cache has the page URL and the match type. It does not keep `fullMatchingImages` file URLs, and this run did not call Vision, so those file URLs were not queried. The code queries them when a detection includes them.
+
+With dating on, the earliest HTTP 200 capture is an existed_by day. It fills a page that has no trusted date, or replaces a trusted date only when the capture is earlier.
+
+### Dating on (full and partial pages)
+
+| | decided | correct 2c | wrong 2c | abstained | gold-True called not-true |
+| --- | --- | --- | --- | --- | --- |
+| before (v2, no Wayback) | 1 | 1 | 0 | 15 | 0 |
+| after, blocked | 3 | 1 | 2 | 13 | 2 (img04, img06) |
+| after, allowed | 3 | 1 | 2 | 13 | 2 (img04, img06) |
+
+img15 stays Misleading, the one correct decision. img04 and img06 are gold True and became Misleading. Both are PIB album pages. img04's earliest full-match capture was 2023-02-13 on pib.gov.in, tier 1, before the 24 November 2026 caption. img06's was 2026-01-19 on pib.gov.in, tier 1, before the same day. A gallery that existed before this photograph was added is not proof the file is from an earlier event. The guard says to turn partials off and run again.
+
+### Partials off, full matches still dated
+
+Blocked, which is the column that decides the guard: decided 3, correct 1, wrong 2, abstained 13, gold-True called not-true 2 (img04, img06). The same two photographs. The captures that called them Misleading are full matches, so leaving partials undated does not change the decision. Allowed in that file repeated the blocked verdict: one image-memory database was shared across the two modes, and the second mode reused the first. The guard still fails on the blocked column alone.
+
+### Wayback off
+
+`ENABLED` is false. No CDX query. Each mode had its own fresh image memory, so allowed did not reuse blocked. `PHOTO_RULE` is still `v2`.
+
+| | decided | correct 2c | wrong 2c | abstained | gold-True called not-true |
+| --- | --- | --- | --- | --- | --- |
+| blocked | 1 | 1 | 0 | 15 | 0 |
+| allowed | 1 | 1 | 0 | 15 | 0 |
+
+img15 is Misleading in both. img04, img05, img06, and img07 are Unverifiable. That matches v2 before Wayback.
+
+The allowed half still called Tavily. An allowed eval runs a fact-check search budget after the caption search, and that budget does not look at `IMAGE_TEXT_SEARCH`. Caption search was off (blocked rows are `not_needed`). The fact-check budget ran (allowed rows are `ran`). Tavily moved from 919 to 988. The ceiling for this task was 960. Vision stayed at 18.
+
+Wayback dating stays off.
+

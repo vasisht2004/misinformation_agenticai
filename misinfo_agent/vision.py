@@ -262,7 +262,31 @@ def _page_from_api(row: dict) -> dict | None:
     else:
         kind = "page"
     title = " ".join(str(row.get("pageTitle") or "").split())
-    return {"url": url, "title": title, "match": kind}
+    page = {"url": url, "title": title, "match": kind}
+    # The file URL, only on a full match. Wayback can have archived the
+    # JPEG before the article that embeds it. A partial file is a
+    # different photograph: dating it would treat a lookalike as this one.
+    if kind == "full":
+        images = _http_urls(row.get("fullMatchingImages"))
+        if images:
+            page["image_urls"] = images
+    return page
+
+
+def _http_urls(items) -> list[str]:
+    """http(s) URLs from a Vision image list. Anything else is not a capture we can ask for."""
+    found = []
+    for item in items or []:
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, dict):
+            text = str(item.get("url") or "")
+        else:
+            continue
+        text = " ".join(text.split())
+        if text.lower().startswith(("http://", "https://")) and text not in found:
+            found.append(text)
+    return found
 
 
 def _page(row: dict) -> dict | None:
@@ -271,7 +295,14 @@ def _page(row: dict) -> dict | None:
     if not url or kind not in _MATCH:
         return None
     title = " ".join(str(row.get("title") or row.get("pageTitle") or "").split())
-    return {"url": url, "title": title, "match": kind}
+    page = {"url": url, "title": title, "match": kind}
+    # Kept when a cache file already stored them. A partial must not
+    # grow a file URL on the way back in: that list is only for a full match.
+    if kind == "full":
+        images = _http_urls(row.get("image_urls"))
+        if images:
+            page["image_urls"] = images
+    return page
 
 
 def _post(image: bytes, key: str) -> dict:
