@@ -20,6 +20,7 @@ import json
 import os
 import threading
 import time
+import unicodedata
 from datetime import datetime, timezone
 from typing import Sequence
 from urllib.parse import urlsplit
@@ -176,13 +177,14 @@ def search(
             purpose, query, 0, started, cached=False, success=False, status="error"
         )
         raise SearchError(purpose, _safe(exc, None, query)) from None
+    sent = normalise_query_text(query)
     if cache_miss:
         # An empty list, not a cached empty search. Writing it would make
         # the next run think Tavily returned nothing. cache_only_miss is
         # the card status: nothing was read, so the card must not say a
         # source addressed the claim.
         _record(
-            purpose, query, 0, started, cached=False, success=True,
+            purpose, sent or query, 0, started, cached=False, success=True,
             cache_miss=True, status="cache_only_miss",
         )
         return []
@@ -191,10 +193,10 @@ def search(
     # the cache write so a replay cannot bring the page back.
     kept = _without_blocked(hits)
     if not from_cache and config.SEARCH_CACHE:
-        _write_cache(query, max_results, include, exclude, search_depth, end_date, kept)
+        _write_cache(sent or query, max_results, include, exclude, search_depth, end_date, kept)
     _record(
         purpose,
-        query,
+        sent or query,
         len(kept),
         started,
         cached=from_cache,
@@ -287,10 +289,17 @@ def site_host(url: str) -> str:
 
 
 def _run(query, purpose, max_results, include, exclude, search_depth, end_date):
+    # Tavily sees the cleaned text, not a lowercased copy. The cache key
+    # is the part that folds case. An empty string after stripping is not
+    # a search: there is nothing to ask and nothing to store.
+    cleaned = normalise_query_text(query)
+    if not cleaned:
+        return [], False, True
     cached = _read_cache(query, max_results, include, exclude, search_depth, end_date)
     if cached is not None:
         # A hit is still a search, from the audit's point of view.
         # cached=True tells box 16 it did not spend a credit again.
+        # A legacy-file hit is included. It is not copied onto the new key.
         return cached, True, False
     # Cache-only is a miss with no provider call. Checked before the fake
     # and before _real so a test can prove Tavily was not asked.
@@ -300,7 +309,7 @@ def _run(query, purpose, max_results, include, exclude, search_depth, end_date):
     # a fake answer must not burn a slot of the monthly quota.
     if _FAKE is not None:
         raw = _FAKE(
-            query,
+            cleaned,
             max_results=max_results,
             include_domains=include or None,
             exclude_domains=exclude or None,
@@ -309,7 +318,7 @@ def _run(query, purpose, max_results, include, exclude, search_depth, end_date):
         )
         return _coerce_hits(raw, purpose), False, False
     return _real(
-        query, purpose, max_results, include, exclude, search_depth, end_date
+        cleaned, purpose, max_results, include, exclude, search_depth, end_date
     ), False, False
 
 
@@ -771,6 +780,67 @@ def _safe(exc: BaseException, key: str | None, query: str) -> str:
     return text or "the search failed"
 
 
+# Edge marks only. A comma inside ₹2,000 is the amount, and a period
+# before "fake OR" is part of the sentence. Quotes are the straight and
+# curly ones people paste from a phone.
+_QUERY_EDGE = frozenset(".,!?;:\"'“”‘’«»")
+
+
+def normalise_query_text(text: str) -> str:
+    """The words Tavily is sent. Case stays; the cache key folds it later.
+
+    NFC so the same accented letter is not two strings. Whitespace
+    collapses so a line break is not a different search. Leading and
+    trailing punctuation is dropped so "total." and "total" are one
+    query. Numbers, ₹, and punctuation in the middle stay: "₹2,000" is
+    an amount, not a broken token.
+    """
+    cleaned = unicodedata.normalize("NFC", str(text or ""))
+    cleaned = " ".join(cleaned.split())
+    while cleaned and cleaned[0] in _QUERY_EDGE:
+        cleaned = cleaned[1:].lstrip()
+    while cleaned and cleaned[-1] in _QUERY_EDGE:
+        cleaned = cleaned[:-1].rstrip()
+    return " ".join(cleaned.split())
+
+
+def _cache_query_key(query: str) -> str:
+    """Lowercased cleaned text. Case is not part of the file name.
+
+    Two spellings of one claim must share a cache entry. The provider
+    still receives normalise_query_text, which keeps the caller's case.
+    """
+    return normalise_query_text(query).lower()
+
+
+def _legacy_query_strings(original: str, cleaned: str) -> list[str]:
+    """Strings whose old hashes may already be on disk.
+
+    Files written before this key existed hashed the query exactly as it
+    was sent, including a capital and a trailing period. The new name is
+    the lowercased cleaned text, so those files would otherwise miss.
+    The first-letter capital and a trailing period are the shapes the
+    neutral line used. This list is read-only: a hit is not copied onto
+    the new key, or a guessed form would become the stored search.
+    """
+    found: list[str] = []
+
+    def add(text: str) -> None:
+        if text and text not in found:
+            found.append(text)
+
+    add(original)
+    add(cleaned)
+    if cleaned:
+        capped = cleaned[0].upper() + cleaned[1:]
+        add(capped)
+        if not cleaned.endswith("."):
+            add(cleaned + ".")
+            add(capped + ".")
+    stored = cleaned.lower()
+    return [text for text in found if text != stored]
+
+
 def _cache_path(query, max_results, include, exclude, search_depth, end_date=None):
     if not config.SEARCH_CACHE:
         return None
@@ -778,6 +848,9 @@ def _cache_path(query, max_results, include, exclude, search_depth, end_date=Non
     # concatenation, and so the key does not depend on dict order.
     # Purpose is not in here: it is an audit label, and the same query
     # asked for two reasons is still the same search.
+    # `query` is already the exact string that belongs in the hash. The
+    # new key lowercases before it gets here. A legacy read passes the
+    # old string through unchanged.
     body = {
         "query": query,
         "max_results": max_results,
@@ -803,8 +876,7 @@ def _cache_path(query, max_results, include, exclude, search_depth, end_date=Non
     return config.SEARCH_CACHE_DIR / f"{digest}.json"
 
 
-def _read_cache(query, max_results, include, exclude, search_depth, end_date=None):
-    path = _cache_path(query, max_results, include, exclude, search_depth, end_date)
+def _load_cache_file(path):
     if path is None or not path.is_file():
         return None
     try:
@@ -819,8 +891,32 @@ def _read_cache(query, max_results, include, exclude, search_depth, end_date=Non
         return None
 
 
+def _read_cache(query, max_results, include, exclude, search_depth, end_date=None):
+    cleaned = normalise_query_text(query)
+    if not cleaned:
+        return None
+    # The new key first. A legacy hit must not be written back here:
+    # copying it would turn a guess about the old spelling into the
+    # stored result for every later case.
+    found = _load_cache_file(
+        _cache_path(cleaned.lower(), max_results, include, exclude, search_depth, end_date)
+    )
+    if found is not None:
+        return found
+    for legacy in _legacy_query_strings(query, cleaned):
+        found = _load_cache_file(
+            _cache_path(legacy, max_results, include, exclude, search_depth, end_date)
+        )
+        if found is not None:
+            return found
+    return None
+
+
 def _write_cache(query, max_results, include, exclude, search_depth, end_date, hits) -> None:
-    path = _cache_path(query, max_results, include, exclude, search_depth, end_date)
+    stored = _cache_query_key(query)
+    if not stored:
+        return
+    path = _cache_path(stored, max_results, include, exclude, search_depth, end_date)
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)

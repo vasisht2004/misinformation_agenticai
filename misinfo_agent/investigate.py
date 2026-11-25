@@ -47,6 +47,7 @@ from misinfo_agent.search import (
     claim_search_status,
     get_search_usage,
     looks_like_factcheck,
+    normalise_query_text,
     registrable_domain,
     reset_claim_searches,
     search,
@@ -946,7 +947,9 @@ def _atomic_text(state: dict) -> str:
     lines = []
     for item in items:
         mark = "core" if item["core"] else "also"
-        lines.append(f"{item['id']} ({mark}) {item['text']}")
+        # The period on "total." is not a different claim. The stance
+        # cache key is this text, so both spellings have to read the same.
+        lines.append(f"{item['id']} ({mark}) {normalise_query_text(item['text']) or item['text']}")
     return "\n".join(lines)
 
 
@@ -969,7 +972,7 @@ def judge_stance(state: dict, passages: list[Passage]) -> StanceBatch | AtomicSt
     prompt = (
         _PROMPT_PATH.read_text(encoding="utf-8")
         .replace("__CLAIM_DATE__", shared.strip())
-        .replace("__CLAIM__", _claim_text(state) or "(none)")
+        .replace("__CLAIM__", normalise_query_text(_claim_text(state)) or "(none)")
         .replace("__ATOMIC__", _atomic_text(state) or "(none)")
         .replace("__PASSAGES__", "\n\n".join(blocks))
     )
@@ -1955,11 +1958,18 @@ def topup_prompt(state: dict, labelled: list[dict], already: list[str]) -> str:
     # prompt bytes do not change if those equals swap.
     found.sort()
     found_text = "\n".join(found[:8]) if found else "Nothing supported or refuted the claim."
-    ordered = sorted(str(item) for item in already if str(item).strip())
+    # A trailing period on a query that was already run is still that
+    # query. Folding it here keeps the prompt, and so the next query the
+    # model proposes, on one cache entry.
+    ordered = sorted(
+        normalise_query_text(str(item)) or str(item).strip()
+        for item in already
+        if str(item).strip()
+    )
     searched = "\n".join(ordered) if ordered else "(none)"
     return (
         _TOPUP_PATH.read_text(encoding="utf-8")
-        .replace("__CLAIM__", _claim_text(state) or "(none)")
+        .replace("__CLAIM__", normalise_query_text(_claim_text(state)) or "(none)")
         .replace("__FOUND__", found_text)
         .replace("__SEARCHED__", searched)
     )
@@ -2124,6 +2134,10 @@ def build_queries(state: dict) -> list[Query]:
             ]
     else:
         claim = _claim_text(state)
+    # Edge punctuation and extra spaces are not a different claim. Case
+    # stays in the text Tavily receives; the cache key is what folds it.
+    # ₹2,000 keeps its comma because the strip is only the edges.
+    claim = normalise_query_text(claim)
     trimmed = _trim_words(claim, _NEUTRAL_WORDS)
     queries: list[Query] = []
     if trimmed:
@@ -2152,7 +2166,7 @@ def build_queries(state: dict) -> list[Query]:
     for item in extras:
         # The core sentence was already searched. A second copy of it
         # would spend a slot and return the same pages.
-        text = _trim_words(item["text"], _NEUTRAL_WORDS)
+        text = normalise_query_text(_trim_words(item["text"], _NEUTRAL_WORDS))
         key = _norm_query(text)
         if not text or key in seen:
             continue
@@ -2164,7 +2178,18 @@ def build_queries(state: dict) -> list[Query]:
     # No split: five lines, as before. A split stops at six so the
     # top-up still has two searches inside the per-claim cap of eight.
     cap = _PLAN_CAP if extras else _MAX_QUERIES
-    return queries[:cap]
+    # The lead and the refute suffix are cleaned here too, so every line
+    # that reaches Tavily has already dropped edge punctuation.
+    cleaned: list[Query] = []
+    seen_text: set[str] = set()
+    for query in queries[:cap]:
+        text = normalise_query_text(query.text)
+        key = _norm_query(text)
+        if not text or key in seen_text:
+            continue
+        seen_text.add(key)
+        cleaned.append(query.model_copy(update={"text": text}))
+    return cleaned
 
 
 def gather_candidates(

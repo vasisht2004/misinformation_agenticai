@@ -319,6 +319,72 @@ def test_lead_query_only_when_similar():
     assert queries[-1].include_domains is None
 
 
+def test_spellings_share_a_query_plan_and_a_cache_key():
+    # "total." and "total" are one search. Case stays in the words sent
+    # to Tavily and is folded only in the cache key, so the two spellings
+    # name the same file. ₹2,000 is an amount: the comma is not trimmed.
+    from misinfo_agent.search import _cache_path, _cache_query_key, normalise_query_text
+
+    assert normalise_query_text("₹2,000") == "₹2,000"
+    assert normalise_query_text("  ₹2,000. ") == "₹2,000"
+    assert normalise_query_text('"Hello."') == "Hello"
+    assert normalise_query_text("India   has  29 states") == "India has 29 states"
+
+    def plan(claim: str) -> list[str]:
+        state = _state(
+            "Society & other",
+            claim=claim,
+            entities={"names": [], "places": [], "amounts": [], "dates": [], "years": []},
+        )
+        return [query.text for query in build_queries(state)]
+
+    capital = plan("India has 29 states in total.")
+    lower = plan("india has 29 states in total")
+    assert [text.casefold() for text in capital] == [text.casefold() for text in lower]
+    assert capital[0] == "India has 29 states in total"
+    assert lower[0] == "india has 29 states in total"
+    assert [_cache_query_key(text) for text in capital] == [_cache_query_key(text) for text in lower]
+    # The file name is the lowercased key, so the paths match too.
+    assert _cache_path(_cache_query_key(capital[0]), 5, [], [], "basic") == _cache_path(
+        _cache_query_key(lower[0]), 5, [], [], "basic"
+    )
+    rupee = plan("The ₹2,000 note was withdrawn.")
+    assert rupee[0] == "The ₹2,000 note was withdrawn"
+    assert "₹2,000" in rupee[0]
+
+
+def test_legacy_search_cache_is_read_and_not_copied(monkeypatch, tmp_path):
+    # A file written before the key was lowercased still answers. The
+    # read does not write that hit under the new name, and it does not
+    # call Tavily. The lowercase spelling has to find the same file.
+    from misinfo_agent.search import Hit
+
+    monkeypatch.setattr(config, "SEARCH_CACHE", True)
+    monkeypatch.setattr(config, "SEARCH_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(config, "BLOCK_FACTCHECK_SITES", False)
+    monkeypatch.setenv("SEARCH_CACHE_ONLY", "1")
+    legacy = "India has 29 states in total."
+    hit = Hit(url="https://sarkarilist.in/list-of-29-states-of-india", title="States", content="28", score=0.8)
+    path = search._cache_path(legacy, 5, [], [], "basic", None)
+    assert path is not None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"hits": [hit.model_dump(mode="json")]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    new_path = search._cache_path(search._cache_query_key("india has 29 states in total"), 5, [], [], "basic", None)
+    assert new_path != path
+
+    def boom(*args, **kwargs):
+        raise AssertionError("Tavily was called")
+
+    monkeypatch.setattr(search, "_real", boom)
+    for spelling in ("india has 29 states in total", "India has 29 states in total."):
+        found = run_search(spelling, purpose="investigate_neutral")
+        assert [row.url for row in found] == [hit.url]
+        assert not new_path.is_file()
+
+
 def test_neutral_query_trims_to_twenty_words():
     words = [f"w{i}" for i in range(25)]
     neutral = build_queries(_state("Health", claim=" ".join(words)))[0]
@@ -2910,6 +2976,16 @@ def test_topup_prompt_and_cache_key_ignore_finish_order(monkeypatch):
     prompt_b = topup_prompt(state, second, late)
     assert prompt_a == prompt_b
     assert "alpha query\nmid query\nzeta query" in prompt_a
+    # The period is not part of the claim the model is asked about.
+    bare = {"claim": "India has 29 states in total"}
+    assert topup_prompt(bare, first, ["alpha query.", "mid query", "zeta query"]) == prompt_a
+    from misinfo_agent.investigate import _atomic_text
+
+    assert _atomic_text(
+        {"atomic_claims": [{"id": "A1", "text": "India has 29 states in total.", "core": True}]}
+    ) == _atomic_text(
+        {"atomic_claims": [{"id": "A1", "text": "India has 29 states in total", "core": True}]}
+    )
     wiki_at = prompt_a.index("en.wikipedia.org")
     book_at = prompt_a.index("testbook.com")
     assert wiki_at < book_at
