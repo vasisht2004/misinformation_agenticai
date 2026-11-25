@@ -6,6 +6,7 @@ The live test at the bottom is the one run that spends credits.
 """
 
 import json
+import time
 
 import pytest
 
@@ -316,6 +317,72 @@ def test_lead_query_only_when_similar():
     assert queries[-1].kind == "lead"
     assert queries[-1].text == "The older wording about the same medicine"
     assert queries[-1].include_domains is None
+
+
+def test_spellings_share_a_query_plan_and_a_cache_key():
+    # "total." and "total" are one search. Case stays in the words sent
+    # to Tavily and is folded only in the cache key, so the two spellings
+    # name the same file. ₹2,000 is an amount: the comma is not trimmed.
+    from misinfo_agent.search import _cache_path, _cache_query_key, normalise_query_text
+
+    assert normalise_query_text("₹2,000") == "₹2,000"
+    assert normalise_query_text("  ₹2,000. ") == "₹2,000"
+    assert normalise_query_text('"Hello."') == "Hello"
+    assert normalise_query_text("India   has  29 states") == "India has 29 states"
+
+    def plan(claim: str) -> list[str]:
+        state = _state(
+            "Society & other",
+            claim=claim,
+            entities={"names": [], "places": [], "amounts": [], "dates": [], "years": []},
+        )
+        return [query.text for query in build_queries(state)]
+
+    capital = plan("India has 29 states in total.")
+    lower = plan("india has 29 states in total")
+    assert [text.casefold() for text in capital] == [text.casefold() for text in lower]
+    assert capital[0] == "India has 29 states in total"
+    assert lower[0] == "india has 29 states in total"
+    assert [_cache_query_key(text) for text in capital] == [_cache_query_key(text) for text in lower]
+    # The file name is the lowercased key, so the paths match too.
+    assert _cache_path(_cache_query_key(capital[0]), 5, [], [], "basic") == _cache_path(
+        _cache_query_key(lower[0]), 5, [], [], "basic"
+    )
+    rupee = plan("The ₹2,000 note was withdrawn.")
+    assert rupee[0] == "The ₹2,000 note was withdrawn"
+    assert "₹2,000" in rupee[0]
+
+
+def test_legacy_search_cache_is_read_and_not_copied(monkeypatch, tmp_path):
+    # A file written before the key was lowercased still answers. The
+    # read does not write that hit under the new name, and it does not
+    # call Tavily. The lowercase spelling has to find the same file.
+    from misinfo_agent.search import Hit
+
+    monkeypatch.setattr(config, "SEARCH_CACHE", True)
+    monkeypatch.setattr(config, "SEARCH_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(config, "BLOCK_FACTCHECK_SITES", False)
+    monkeypatch.setenv("SEARCH_CACHE_ONLY", "1")
+    legacy = "India has 29 states in total."
+    hit = Hit(url="https://sarkarilist.in/list-of-29-states-of-india", title="States", content="28", score=0.8)
+    path = search._cache_path(legacy, 5, [], [], "basic", None)
+    assert path is not None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"hits": [hit.model_dump(mode="json")]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    new_path = search._cache_path(search._cache_query_key("india has 29 states in total"), 5, [], [], "basic", None)
+    assert new_path != path
+
+    def boom(*args, **kwargs):
+        raise AssertionError("Tavily was called")
+
+    monkeypatch.setattr(search, "_real", boom)
+    for spelling in ("india has 29 states in total", "India has 29 states in total."):
+        found = run_search(spelling, purpose="investigate_neutral")
+        assert [row.url for row in found] == [hit.url]
+        assert not new_path.is_file()
 
 
 def test_neutral_query_trims_to_twenty_words():
@@ -2869,6 +2936,88 @@ def test_round_two_runs_unused_plan_queries_and_skips_the_topup(monkeypatch):
     assert result["investigate_stats"]["topup_used"] is False
     assert result["investigate_stats"]["topup_queries"] == []
     assert [row["id"] for row in result["evidence"]] == ["E3"]
+
+
+def test_topup_prompt_and_cache_key_ignore_finish_order(monkeypatch):
+    # Two finish orders of the same searches, and two orders of the same
+    # pages, have to hash to one cache file. The key is the prompt.
+    from misinfo_agent.investigate import TopupBatch, topup_prompt
+    from misinfo_agent.llm import _cache_path
+
+    monkeypatch.setattr(config, "LLM_CACHE", True)
+    wiki = Passage(
+        passage_id="P1",
+        url="https://en.wikipedia.org/wiki/States_and_union_territories_of_India",
+        netloc="en.wikipedia.org",
+        title="States",
+        text="India has 28 states.",
+        cos=0.4,
+        fetched=True,
+    )
+    book = Passage(
+        passage_id="P2",
+        url="https://testbook.com/question-answer/states",
+        netloc="testbook.com",
+        title="Quiz",
+        text="28 states.",
+        cos=0.3,
+        fetched=True,
+    )
+    first = [
+        {"stance": "refutes", "quote": "28 states and 8 union territories", "passage": wiki},
+        {"stance": "neutral", "quote": "not evidence", "passage": wiki},
+        {"stance": "refutes", "quote": "28 states in the Indian union", "passage": book},
+    ]
+    second = list(reversed(first))
+    state = {"claim": "India has 29 states in total."}
+    early = ["zeta query", "alpha query", "mid query"]
+    late = ["mid query", "zeta query", "alpha query"]
+    prompt_a = topup_prompt(state, first, early)
+    prompt_b = topup_prompt(state, second, late)
+    assert prompt_a == prompt_b
+    assert "alpha query\nmid query\nzeta query" in prompt_a
+    # The period is not part of the claim the model is asked about.
+    bare = {"claim": "India has 29 states in total"}
+    assert topup_prompt(bare, first, ["alpha query.", "mid query", "zeta query"]) == prompt_a
+    from misinfo_agent.investigate import _atomic_text
+
+    assert _atomic_text(
+        {"atomic_claims": [{"id": "A1", "text": "India has 29 states in total.", "core": True}]}
+    ) == _atomic_text(
+        {"atomic_claims": [{"id": "A1", "text": "India has 29 states in total", "core": True}]}
+    )
+    wiki_at = prompt_a.index("en.wikipedia.org")
+    book_at = prompt_a.index("testbook.com")
+    assert wiki_at < book_at
+    assert "not evidence" not in prompt_a
+    key_a = _cache_path("model", "topup_v1", prompt_a, TopupBatch, None)
+    key_b = _cache_path("model", "topup_v1", prompt_b, TopupBatch, None)
+    assert key_a == key_b
+    assert key_a is not None
+
+
+def test_recorded_queries_follow_issue_order_not_finish_order(monkeypatch):
+    # The worker that finishes first must not become the first stored query.
+    # That list is what the top-up prompt used to hash.
+    import threading
+
+    from misinfo_agent.investigate import Query, _run_queries
+
+    gate = threading.Barrier(2)
+
+    def fake_search(query, **kwargs):
+        gate.wait(timeout=2)
+        if query == "slow":
+            time.sleep(0.05)
+        return []
+
+    monkeypatch.setattr("misinfo_agent.investigate.search", fake_search)
+    ran: list[str] = []
+    _run_queries(
+        [Query(text="slow", kind="neutral"), Query(text="fast", kind="verify")],
+        ran=ran,
+    )
+    assert ran == ["slow", "fast"]
 
 
 def _body(score: str, quote: str) -> str:

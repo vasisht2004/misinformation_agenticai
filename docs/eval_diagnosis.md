@@ -796,3 +796,37 @@ The allowed half still called Tavily. An allowed eval runs a fact-check search b
 
 Wayback dating stays off.
 
+## G2R-2 pre-registered rule
+
+Written before G2R-2 was scored on the 16 established facts or the 50-claim eval.
+
+G2R-2 is the current gate (G1, G2R, G3, relaxed core match, single tier-1 denial) with one change on the weak-refute path: two or more independent refuting groups of any tier are enough, instead of three. It still requires zero support at any tier, and every counted refute has to pass the relaxed core match. Support is never decided this way. Confidence is capped at 0.5. The caveat stays "Lower-tier sources only: no tier 1-2 source was found."
+
+Turn G2R-2 on only if, on the 16 facts and the 50-claim eval combined, it makes more correct 2-class decisions than the current gate and zero additional wrong 2-class decisions. Otherwise leave it off. A 2-class decision treats False and Misleading as the same "not true" label. True stays True. An abstention is not a wrong decision. A False/Misleading swap is not an extra 2-class error.
+
+### Score
+
+Zero model calls and zero searches. The current gate is G1, G2R (three groups, cap 0.6), and G3, with relaxed core match and the single tier-1 denial. G2R-2 lowers that weak-refute bar to two groups and the cap to 0.5. The 16 facts are re-gated with the post-claim date guard off, which is how those rows were stored. The 50-claim eval is re-gated with the guard on, which is the blocked-eval leakage rule. A missing refute_kind stays Misleading. Correct and wrong below are 2-class.
+
+| set | gate | decided | correct | wrong |
+| --- | --- | --- | --- | --- |
+| 16 facts | current | 12 | 12 | 0 |
+| 16 facts | G2R-2 | 13 | 13 | 0 |
+| 50-claim eval | current | 13 | 12 | 1 |
+| 50-claim eval | G2R-2 | 14 | 13 | 1 |
+| combined | current | 25 | 24 | 1 |
+| combined | G2R-2 | 27 | 26 | 1 |
+
+Claims that changed:
+
+| set | id | gold | current | G2R-2 |
+| --- | --- | --- | --- | --- |
+| 16 facts | f16 | False | Unverifiable | Misleading |
+| 50-claim eval | 0ac969a5ab9e | Misleading | Unverifiable | Misleading |
+
+f16 is "Sanskrit is an official language of the Union government alongside Hindi." 0ac969a5ab9e is "Domino's Pizza, sauces, and cheese contain harmful and carcinogenic ingredients." Both moved from an abstention to a 2-class-correct decision. The one 2-class error already on the 50-claim eval did not change. Combined correct 2-class decisions went from 24 to 26, and wrong 2-class decisions stayed at 1.
+
+G2R-2 is on: `GATE_WEAK_REFUTE_2 = True`.
+
+"India has 29 states in total." replayed from the stored threads, same evidence, no new call. The 25 Nov 15:28 thread (`c7247e5413704575bccc7150ec692a0e`, raw text with the capital and the period) stays False under both gates: three lower-tier refuting groups and the cached refute kind. The later thread (`1ea7ddbad1b140548d4292d9c965081c`, raw text `india has 29 states in total`) is Unverifiable under the current gate (two refuting groups) and Misleading under G2R-2, with the lower-tier caveat.
+

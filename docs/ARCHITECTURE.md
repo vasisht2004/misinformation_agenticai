@@ -79,6 +79,7 @@ Typical cost per claim: **3–6 LLM calls, ~5–7 searches, ~40 s.**
 
 - **G1** `GATE_PRIMARY_SOURCE`: one tier-1 page from the office the claim names can support or refute when no tier 1–2 group is on the other side.
 - **G2R** `GATE_WEAK_REFUTE`: three independent lower-tier refutations, and nobody supporting, can refute. The card says no tier 1–2 source was found, and confidence is capped at 0.6. Support is never decided from lower-tier pages alone.
+- **G2R-2** `GATE_WEAK_REFUTE_2`: the same path with two refuting groups instead of three, confidence capped at 0.5, and the same caveat. On, because on the 16 facts and the 50-claim eval combined it added correct 2-class decisions and no extra 2-class errors. Support is still never decided this way.
 - **G3** `GATE_SHARED_SOURCE`: two outlets that share a 12-word run are one source.
 - **Stale official:** a tier-1 page older than `STALE_DAYS` (365) does not win by itself against a current page on the other side.
 - **Core match** `TRUE_NEEDS_CORE_MATCH`, mode `relaxed`: a support quote has to carry the core's numbers, dates, name, and action. A paraphrase of the verb counts. A different figure does not.

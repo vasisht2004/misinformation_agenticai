@@ -47,6 +47,7 @@ from misinfo_agent.search import (
     claim_search_status,
     get_search_usage,
     looks_like_factcheck,
+    normalise_query_text,
     registrable_domain,
     reset_claim_searches,
     search,
@@ -946,7 +947,9 @@ def _atomic_text(state: dict) -> str:
     lines = []
     for item in items:
         mark = "core" if item["core"] else "also"
-        lines.append(f"{item['id']} ({mark}) {item['text']}")
+        # The period on "total." is not a different claim. The stance
+        # cache key is this text, so both spellings have to read the same.
+        lines.append(f"{item['id']} ({mark}) {normalise_query_text(item['text']) or item['text']}")
     return "\n".join(lines)
 
 
@@ -969,7 +972,7 @@ def judge_stance(state: dict, passages: list[Passage]) -> StanceBatch | AtomicSt
     prompt = (
         _PROMPT_PATH.read_text(encoding="utf-8")
         .replace("__CLAIM_DATE__", shared.strip())
-        .replace("__CLAIM__", _claim_text(state) or "(none)")
+        .replace("__CLAIM__", normalise_query_text(_claim_text(state)) or "(none)")
         .replace("__ATOMIC__", _atomic_text(state) or "(none)")
         .replace("__PASSAGES__", "\n\n".join(blocks))
     )
@@ -1929,24 +1932,52 @@ def _topup(state, labelled, passages, already):
     return True, extra_labelled, chosen, bundle["pages"], ran, unverified, joined
 
 
-def propose_topup(state: dict, labelled: list[dict], already: list[str]) -> TopupBatch:
-    """One call. The prompt file holds the rules; the code caps the list at two."""
+def topup_prompt(state: dict, labelled: list[dict], already: list[str]) -> str:
+    """The top-up prompt. Shuffling its inputs must not change a byte of it.
+
+    The LLM cache key is a hash of this text. Searches finish on a thread
+    pool, so the "already searched" list used to arrive in finish order,
+    and the same claim missed the cache and proposed a different query.
+    Sorting by the query text makes the key depend on the set of queries.
+    The found lines are sorted for the same reason, and the eight-line cap
+    is applied after that sort, so which lines survive is also not an
+    arrival order. Neutrals are not evidence and stay out of the prompt.
+    """
     found = []
     for row in labelled:
-        if row["stance"] == "neutral":
+        if row.get("stance") == "neutral":
             continue
-        passage = row["passage"]
+        passage = row.get("passage")
+        if passage is None:
+            continue
         found.append(
-            f"{passage.netloc} tier {credibility_tier(passage.url)} {row['stance']}: {row['quote']}"
+            f"{passage.netloc} tier {credibility_tier(passage.url)} "
+            f"{row.get('stance')}: {row.get('quote') or ''}"
         )
+    # Lexicographic, not finish order. Equal lines stay together; the
+    # prompt bytes do not change if those equals swap.
+    found.sort()
     found_text = "\n".join(found[:8]) if found else "Nothing supported or refuted the claim."
-    searched = "\n".join(already) if already else "(none)"
-    prompt = (
+    # A trailing period on a query that was already run is still that
+    # query. Folding it here keeps the prompt, and so the next query the
+    # model proposes, on one cache entry.
+    ordered = sorted(
+        normalise_query_text(str(item)) or str(item).strip()
+        for item in already
+        if str(item).strip()
+    )
+    searched = "\n".join(ordered) if ordered else "(none)"
+    return (
         _TOPUP_PATH.read_text(encoding="utf-8")
-        .replace("__CLAIM__", _claim_text(state) or "(none)")
+        .replace("__CLAIM__", normalise_query_text(_claim_text(state)) or "(none)")
         .replace("__FOUND__", found_text)
         .replace("__SEARCHED__", searched)
     )
+
+
+def propose_topup(state: dict, labelled: list[dict], already: list[str]) -> TopupBatch:
+    """One call. The prompt file holds the rules; the code caps the list at two."""
+    prompt = topup_prompt(state, labelled, already)
     return call_structured(
         prompt,
         TopupBatch,
@@ -2103,6 +2134,10 @@ def build_queries(state: dict) -> list[Query]:
             ]
     else:
         claim = _claim_text(state)
+    # Edge punctuation and extra spaces are not a different claim. Case
+    # stays in the text Tavily receives; the cache key is what folds it.
+    # ₹2,000 keeps its comma because the strip is only the edges.
+    claim = normalise_query_text(claim)
     trimmed = _trim_words(claim, _NEUTRAL_WORDS)
     queries: list[Query] = []
     if trimmed:
@@ -2131,7 +2166,7 @@ def build_queries(state: dict) -> list[Query]:
     for item in extras:
         # The core sentence was already searched. A second copy of it
         # would spend a slot and return the same pages.
-        text = _trim_words(item["text"], _NEUTRAL_WORDS)
+        text = normalise_query_text(_trim_words(item["text"], _NEUTRAL_WORDS))
         key = _norm_query(text)
         if not text or key in seen:
             continue
@@ -2143,7 +2178,18 @@ def build_queries(state: dict) -> list[Query]:
     # No split: five lines, as before. A split stops at six so the
     # top-up still has two searches inside the per-claim cap of eight.
     cap = _PLAN_CAP if extras else _MAX_QUERIES
-    return queries[:cap]
+    # The lead and the refute suffix are cleaned here too, so every line
+    # that reaches Tavily has already dropped edge punctuation.
+    cleaned: list[Query] = []
+    seen_text: set[str] = set()
+    for query in queries[:cap]:
+        text = normalise_query_text(query.text)
+        key = _norm_query(text)
+        if not text or key in seen_text:
+            continue
+        seen_text.add(key)
+        cleaned.append(query.model_copy(update={"text": text}))
+    return cleaned
 
 
 def gather_candidates(
@@ -2265,7 +2311,7 @@ def _run_queries(
     def run(query: Query):
         nonlocal stop
         if stop:
-            return query, []
+            return query, [], False
         # The kind is in the purpose because the usage row has no kind
         # field of its own, and box 16 already stores purpose.
         # A failed line is a miss. The other lines still stand. The quota
@@ -2284,18 +2330,23 @@ def _run_queries(
             _remember_cap(capped, exc.cap)
             if cap_reasons is not None and str(exc) not in cap_reasons:
                 cap_reasons.append(str(exc))
-            return query, []
+            # Not recorded. The next round can still try a query the cap refused.
+            return query, [], False
         except SearchError:
-            if ran is not None:
-                ran.append(query.text)
-            return query, []
-        if ran is not None:
-            ran.append(query.text)
-        return query, hits
+            return query, [], True
+        return query, hits, True
 
     workers = min(4, len(queries))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(run, queries))
+        # map keeps issue order. Appending inside the worker used to record
+        # finish order, and that order was the top-up prompt. Two runs of
+        # the same claim then hashed to two cache keys.
+        finished = list(pool.map(run, queries))
+    if ran is not None:
+        for query, _hits, keep in finished:
+            if keep:
+                ran.append(query.text)
+    return [(query, hits) for query, hits, _keep in finished]
 
 
 def _remember_cap(capped: list | None, kind: str | None) -> None:
