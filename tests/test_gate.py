@@ -519,16 +519,16 @@ def test_relaxed_dates_numbers_and_rupees_match_exactly(monkeypatch):
     assert core_support_matches("The ₹500 note was withdrawn.", rupee) is False
 
 
-def test_refute_matches_the_subject_and_not_the_claim_number():
+def test_refute_does_not_need_the_claim_number():
     # 28 states is a correction of 45. The number must not have to match.
-    # Nepal is a different country. A 28-states quote is not support for 45.
-    from misinfo_agent.gate import refute_core_failure, refute_core_matches
+    # A quote that shares none of the claim's content words is a different
+    # subject. A 28-states quote is not support for 45.
+    from misinfo_agent.gate import refute_core_matches
     from misinfo_agent.prior_match import core_support_matches
 
     claim = "India has 45 states in total."
     correction = "India has 28 states and 8 union territories"
     assert refute_core_matches(correction, claim) is True
-    assert refute_core_failure("Nepal has 7 provinces", claim) == "India"
     assert refute_core_matches("Nepal has 7 provinces", claim) is False
     assert core_support_matches(correction, claim) is False
     assert refute_core_matches("RBI was established in 1935", "RBI founded 1947") is True
@@ -547,28 +547,55 @@ def test_refute_matches_the_subject_and_not_the_claim_number():
     ], rounds=2, atomic_claims=atomic))
     assert nepal["atomic_status"]["A1"] == "insufficient"
 
-    # An undated page that never names India is not a tier-1 vote, so it
-    # cannot block the lower-tier denials that do name India.
-    stale = _row(
-        1, "2009-2017.state.gov", "refutes", 1,
-        host="2009-2017.state.gov",
-        quote="Political subdivisions: 28 states, 7 union territories.",
-    )
-    kept = gate(_state(claim=claim, evidence=[
-        stale,
-        _row(2, "en.wikipedia.org", "refutes", 3, quote=correction),
-        _row(3, "testbook.com", "refutes", 4, quote="India has 28 states and 8 union territories."),
-    ], rounds=2, atomic_claims=atomic))
-    assert kept["atomic_status"]["A1"] == "refuted"
-    assert "outdated" not in _joined(kept)
-    assert config.WEAK_REFUTE_CAVEAT in _joined(kept)
-
     supported = gate(_state(claim=claim, evidence=[
         _row(1, "pib.gov.in", "supports", 1, quote=correction),
         _row(2, "ndtv.com", "supports", 2, quote=correction),
     ], rounds=2, atomic_claims=atomic))
     assert supported["atomic_status"]["A1"] == "insufficient"
     assert set(supported["core_detail_only_ids"]) == {"E1", "E2"}
+
+
+def test_stale_tier1_is_downgraded_and_lower_tiers_can_refute():
+    # The undated office page still produces the outdated sentence, and
+    # it still counts as one vote. It is tier 3 for the count, so it
+    # neither decides alone nor blocks the lower-tier path.
+    claim = "India has 45 states in total."
+    atomic = [{"id": "A1", "text": claim, "core": True, "checkable": True}]
+    stale = _row(
+        1, "2009-2017.state.gov", "refutes", 1,
+        host="2009-2017.state.gov",
+        quote="Political subdivisions: 28 states, 7 union territories.",
+    )
+    out = gate(_state(claim=claim, evidence=[
+        stale,
+        _row(2, "en.wikipedia.org", "refutes", 3, quote="India has 28 states and 8 union territories"),
+        _row(3, "testbook.com", "refutes", 4, quote="At present, there are 28 states in the Indian union."),
+    ], rounds=2, atomic_claims=atomic))
+    assert out["atomic_status"]["A1"] == "refuted"
+    assert out["gate"] == "sufficient"
+    assert "none of them is tier 1 or 2" in _joined(out)
+    assert config.WEAK_REFUTE_CAVEAT in _joined(out)
+    assert "official page may be outdated: 2009-2017.state.gov, undated" in _joined(out)
+
+
+def test_stale_tier1_with_support_does_not_refute_the_true_count():
+    # f01. The ministry page is undated and says 29. Pages that say 28
+    # and 8 are support, so the lower-tier path does not fire, and the
+    # downgraded ministry page is not a credible refute.
+    claim = "India has 28 states and 8 union territories."
+    atomic = [{"id": "A1", "text": claim, "core": True, "checkable": True}]
+    stale = _row(
+        1, "interstatecouncil.mha.gov.in", "refutes", 1,
+        host="interstatecouncil.mha.gov.in",
+        quote="Today the republic of India comprises of 29 States and 7 Union Territories.",
+    )
+    out = gate(_state(claim=claim, evidence=[
+        stale,
+        _row(2, "en.wikipedia.org", "supports", 3, quote="India is a federal union comprising 28 states and 8 union territories"),
+        _row(3, "vedantu.com", "supports", 4, quote="India currently has 28 States and 8 Union Territories"),
+        _row(4, "brainly.in", "refutes", 4, quote="India is divided into 28 states and 7 union territories"),
+    ], rounds=2, atomic_claims=atomic))
+    assert out["atomic_status"]["A1"] == "insufficient"
 
 
 def test_one_tier1_denial_refutes_only_when_the_flag_is_on(monkeypatch):

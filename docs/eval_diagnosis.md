@@ -870,3 +870,34 @@ Combined wrong 2-class decisions stayed at 1. No claim that was correct or absta
 
 "India has 45 states in total." thread `c964ff2ffcb346d5a533c6de4dfb21ea`, same stored rows, no search. The state.gov quote does not name India, so that undated tier-1 row no longer counts and no longer blocks the others. Five lower-tier groups name India and states. The zero-call mapping, with the stored kind still empty, is Misleading and the lower-tier caveat, confidence capped at 0.5. One assess call was then allowed to set the kind, because the original draft was written while the gate was insufficient and the kind is dropped in that case. It returned `single_fact_wrong`. The card is False, confidence 0.5, caveat "Lower-tier sources only: no tier 1-2 source was found." Gate reasons: "A1 is refuted: 5 independent groups refute it, and none of them is tier 1 or 2." The search counter did not change.
 
+## Stale-official downgrade pre-registered rule
+
+Written before the downgrade was scored on the 16 established facts, the 50-claim eval, or the stored "India has 45 states in total." thread.
+
+The comparison is against the gate from before PR #12. That baseline, on the 16 facts and the 50-claim eval combined, is 26 correct 2-class decisions and 1 wrong. PR #12's requirement that a refute quote contain the main entity is not part of this gate. The refute match is the earlier one: a denial does not have to repeat the claim's number, date, or amount.
+
+A tier-1 page that the stale-official guard flags ("official page may be outdated") is counted as tier 3 for this claim. It still adds one vote on its side. It is not a credible group, so it cannot decide the claim alone and it does not block G2R or G2R-2. The same reason sentence stays on the card. A dated, recent tier-1 page is not flagged and is unchanged.
+
+Keep the change only if, against that baseline, it adds zero new wrong 2-class decisions and loses zero correct 2-class decisions (combined correct at least 26), and the stored 45-states thread is False or Misleading. A 2-class decision treats False and Misleading as the same "not true" label. True stays True. An abstention is not a wrong decision. A False/Misleading swap is not an extra 2-class error. A new wrong decision is a claim that was correct or abstained and becomes wrong. A lost correct decision is a claim that was a correct 2-class decision and is no longer one.
+
+The 16 facts are re-gated with the post-claim date guard off. The 50-claim eval is re-gated with the guard on. A reused prior keeps its stored verdict. A missing refute_kind stays Misleading. No new model call and no search. The 45-states thread is re-gated on the same stored rows. It is not one of the 66 scored claims. It passes this rule when the replayed label is False or Misleading.
+
+### Score
+
+Zero model calls and zero searches. Before is the gate from before PR #12. After drops that pull request's entity-in-quote refute rule and counts a flagged official page as tier 3. Correct and wrong are 2-class.
+
+| set | gate | decided | correct | wrong |
+| --- | --- | --- | --- | --- |
+| 16 facts | before | 13 | 13 | 0 |
+| 16 facts | after | 13 | 13 | 0 |
+| 50-claim eval | before | 14 | 13 | 1 |
+| 50-claim eval | after | 14 | 13 | 1 |
+| combined | before | 27 | 26 | 1 |
+| combined | after | 27 | 26 | 1 |
+
+No claim changed on either set. The four claims PR #12 had moved to Unverifiable (`e2230f5774ce`, `d021be8bdf6e`, `499379e42db6`, `4b035555fded`) are back on their earlier labels. The one wrong decision is still `0ab825964c1e`, gold Misleading, predicted True. Combined correct stayed at 26 and wrong stayed at 1. Nothing that was correct was lost, and nothing new is wrong.
+
+"India has 45 states in total." thread `c964ff2ffcb346d5a533c6de4dfb21ea`, same stored rows. The undated state.gov page is tier 3 for the count and still named in the reasons. Six groups refute, none of them tier 1 or 2. The stored kind is empty, so the replayed label is Misleading, confidence 0.5, with the lower-tier caveat. Gate reasons: "A1 is refuted: 6 independent groups refute it, and none of them is tier 1 or 2." / "Lower-tier sources only: no tier 1-2 source was found." / "official page may be outdated: 2009-2017.state.gov, undated."
+
+The change is kept.
+
