@@ -901,3 +901,38 @@ No claim changed on either set. The four claims PR #12 had moved to Unverifiable
 
 The change is kept.
 
+## Stale-support pre-registered rule
+
+Written before this support-side guard was scored on the 16 established facts, the 50-claim eval, the stored 29-states threads, or the stored 45-states thread.
+
+The comparison is against the current gate. That baseline, on the 16 facts and the 50-claim eval combined, is 27 decided, 26 correct, and 1 wrong.
+
+On a present-tense count, status, or office claim, a support row that is undated, or dated earlier than the newest dated refute, is possibly outdated. The card says "supporting page may be outdated: <host>, <date or undated>". That row counts as tier 3 at best. It does not block G2R, G2R-2, or the single-denial rule. A support that is the newest dated evidence on either side still blocks. A claim that is not present tense is unchanged. When the refute paths do not decide, the support decision is the same rule as before.
+
+Keep the change only if, against that baseline, it adds zero new wrong 2-class decisions and loses zero correct 2-class decisions, and both 29-states threads replay as False or Misleading. The two threads are `4d5d3f79c19645aa9961a04b3a5944cd` ("india has a total on 29 states.") and `3b074f5976b0449ba80b64f13a0c0ff8` ("india has 29 states in total"). A 2-class decision treats False and Misleading as the same "not true" label. True stays True. An abstention is not a wrong decision. A False/Misleading swap is not an extra 2-class error. A new wrong decision is a claim that was correct or abstained and becomes wrong. A lost correct decision is a claim that was a correct 2-class decision and is no longer one.
+
+The 16 facts are re-gated with the post-claim date guard off. The 50-claim eval is re-gated with the guard on. A reused prior keeps its stored verdict. A missing refute_kind stays Misleading. No new model call and no search. The 45-states thread is re-gated on the same stored rows and is not one of the 66 scored claims. The 29-states threads are not in those 66 either. They pass this rule when the replayed label is False or Misleading.
+
+### Score
+
+Zero model calls and zero searches. Before is the current gate. After labels an older or undated support on a present-tense claim as possibly outdated, so that page does not block a lower-tier refute. Correct and wrong are 2-class.
+
+| set | gate | decided | correct | wrong |
+| --- | --- | --- | --- | --- |
+| 16 facts | before | 13 | 13 | 0 |
+| 16 facts | after | 13 | 13 | 0 |
+| 50-claim eval | before | 14 | 13 | 1 |
+| 50-claim eval | after | 14 | 13 | 1 |
+| combined | before | 27 | 26 | 1 |
+| combined | after | 27 | 26 | 1 |
+
+No claim changed on either set. The one wrong decision is still `0ab825964c1e`, gold Misleading, predicted True. Combined decided stayed at 27, correct at 26, and wrong at 1.
+
+`4d5d3f79c19645aa9961a04b3a5944cd`, raw "india has a total on 29 states." The single support is undated brainly.in, "There are 29 states in India.", tier 4, group G1. Four refute groups are newer or undated beside that page. Replayed label Misleading, confidence 0.2369, lower-tier caveat. Gate reasons: "A1 is refuted: 4 independent groups refute it, and none of them is tier 1 or 2." / "Lower-tier sources only: no tier 1-2 source was found." / "supporting page may be outdated: brainly.in, undated."
+
+`3b074f5976b0449ba80b64f13a0c0ff8`, raw "india has 29 states in total". No support row. Replayed label False, confidence 0.287, the same lower-tier caveat. Three groups refute, none of them tier 1 or 2.
+
+The 45-states thread stays Misleading, confidence 0.5, with the official-page sentence still on the card.
+
+The change is kept.
+
