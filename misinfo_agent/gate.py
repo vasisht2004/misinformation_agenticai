@@ -209,13 +209,20 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
     aid = str(atomic.get("id") or "A1")
     text = str(atomic.get("text") or "")
     # all_rows still holds a support that only confirms a side detail.
-    # G2R's "nobody supports this" test has to see that page. The split
-    # below is what the support count uses, and it is unchanged.
+    # G2R's "nobody supports this" test has to see that page. The support
+    # split below is what the support count uses. Off-subject refutes are
+    # removed from both lists first.
     all_rows = counted_rows(_rows(state.get("evidence"), aid, drop_after=drop_after))
     detail_ids: list[str] = []
     rows = all_rows
     if config.TRUE_NEEDS_CORE_MATCH and _is_core(state, aid):
-        rows, detail_ids = _split_core_supports(rows, text)
+        # Off-subject denials are removed before either count. A stale
+        # page about a different topic must not sit in refute_credible
+        # and block the denials that do name this subject. all_rows keeps
+        # every support, including one that only confirms a side detail,
+        # so the weak-refute "anybody supports this" test still sees it.
+        all_rows = _drop_off_subject_refutes(all_rows, text)
+        rows, detail_ids = _split_core_supports(all_rows, text)
     groups = _groups(rows)
     reasons: list[str] = []
     for name in groups["conflict"]:
@@ -825,7 +832,9 @@ def _split_core_supports(rows: list[dict], core_text: str) -> tuple[list[dict], 
     the exact verb on the quote. "relaxed" allows a surname or a synonym
     and may use the sentence around the quote. Both still require the
     core's numbers and dates, and both still need two tier 1-2 groups
-    before the core counts as supported. A refute is unchanged.
+    before the core counts as supported. A refute is not filtered here.
+    _drop_off_subject_refutes applies the subject rule, which does not
+    ask the quote to repeat the claim's figure.
     """
     from misinfo_agent.prior_match import core_support_matches
 
@@ -896,14 +905,83 @@ def evidence_score(state: dict, rows: list[dict], core_text: str) -> float:
 
 
 def refute_core_matches(quote: str, core: str, *, passage: str = "") -> bool:
-    """Relaxed core match for a denial.
+    """True when a denial is about this subject, whatever figure it states."""
+    return refute_core_failure(quote, core, passage=passage) == ""
+
+
+def refute_core_failure(quote: str, core: str, *, passage: str = "") -> str:
+    """The subject term a denial failed to carry, or "" when it matches.
 
     A correction states a different figure. "28 states" is how a page
-    refutes "29 states". Requiring the quote to repeat 29 would drop every
-    numeric correction. The name and the verb still have to satisfy the
-    relaxed support rule. When that rule has nothing left to check, the
-    quote still has to share a content word with the claim, or any denial
-    of any sentence would pass.
+    refutes "45 states", and "established in 1935" is how a page refutes
+    "founded in 1947". Requiring the quote to repeat 45 or 1947 would
+    drop every numeric correction. The subject still has to be the same
+    one: the main entity and the attribute word ("India" and "states").
+    A page about Nepal, or about a different scheme, fails that and the
+    returned word is the term that was missing.
+
+    A claim with no name and no attribute keeps the older overlap test.
+    Those sentences have no subject to protect, and a fixture row whose
+    quote is only the stance label has nothing in it to reject.
+    """
+    entity, attribute, applicable = _refute_subject(str(core or ""))
+    if not applicable:
+        return "" if _refute_legacy(quote, core, passage) else _legacy_miss(quote, core, passage)
+    from misinfo_agent.prior_match import _quote_and_sentence
+
+    haystack = _quote_and_sentence(quote, passage)
+    if entity and not _entity_in_refute(entity, haystack):
+        return entity
+    if attribute and not _attribute_in_refute(attribute, haystack):
+        return attribute
+    return ""
+
+
+def _drop_off_subject_refutes(rows: list[dict], core_text: str) -> list[dict]:
+    """Remove refute quotes that name a different subject.
+
+    A row whose quote has no real words is kept. The stance label is all
+    box 7 stored, and there is no subject in that quote to disagree with.
+    Support rows are not touched.
+    """
+    if not _refute_subject(core_text)[2]:
+        return rows
+    kept = []
+    for row in rows:
+        if row.get("stance") != "refutes":
+            kept.append(row)
+            continue
+        quote = str(row.get("quote") or "")
+        if not _quote_has_prose(quote):
+            kept.append(row)
+            continue
+        if refute_core_matches(quote, core_text, passage=str(row.get("passage") or "")):
+            kept.append(row)
+    return kept
+
+
+def _quote_has_prose(quote: str) -> bool:
+    """True when the quote contains a word that could name a subject.
+
+    "refutes 1" is the placeholder a count-only fixture stores. Treating
+    that label as a topic would drop every such row, including the ones
+    the group tests are about. A real quotation has some other word.
+    """
+    words = [
+        word
+        for word in re.findall(r"[A-Za-z]{4,}", quote or "")
+        if word.casefold() not in {"refutes", "supports", "neutral"}
+    ]
+    return bool(words)
+
+
+def _refute_legacy(quote: str, core: str, passage: str) -> bool:
+    """The overlap test used when the claim names no subject.
+
+    Numbers are blanked, same as before. One shared content word is
+    enough, because there is no entity or attribute to demand. Any
+    denial of any sentence must still fail when the claim has words
+    and the quote shares none of them.
     """
     from misinfo_agent.prior_match import (
         _action_words,
@@ -918,14 +996,222 @@ def refute_core_matches(quote: str, core: str, *, passage: str = "") -> bool:
     if _relaxed_entity(blanked) or _action_words(blanked):
         return True
     haystack = _quote_and_sentence(quote, passage).casefold()
-    words = [
+    words = _legacy_words(core)
+    if not words:
+        return bool(str(quote or "").strip())
+    return any(re.search(rf"\b{re.escape(word)}\b", haystack) for word in words)
+
+
+def _legacy_miss(quote: str, core: str, passage: str) -> str:
+    from misinfo_agent.prior_match import _quote_and_sentence
+
+    haystack = _quote_and_sentence(quote, passage).casefold()
+    missing = [
+        word
+        for word in _legacy_words(core)
+        if re.search(rf"\b{re.escape(word)}\b", haystack) is None
+    ]
+    if missing:
+        return missing[0]
+    return "subject"
+
+
+def _legacy_words(core: str) -> list[str]:
+    return [
         word
         for word in re.findall(r"[a-z]{4,}", str(core or "").casefold())
         if word not in _CONTENT_STOP
     ]
-    if not words:
-        return bool(str(quote or "").strip())
-    return any(re.search(rf"\b{re.escape(word)}\b", haystack) for word in words)
+
+
+def _refute_subject(core: str) -> tuple[str, str, bool]:
+    """(entity, attribute, applicable).
+
+    Applicable means the sentence has a name, an action, or a figure
+    with a noun, so a denial can be held to that subject. A sentence
+    with none of those is not given a new rule.
+    """
+    text = str(core or "")
+    entity = _named_org(text) or _refute_entity_name(text)
+    # The noun next to the figure is the attribute ("45 states", "₹500
+    # notes"). A framing verb such as "announced" is not, or a denial
+    # that says "invalid" and "notes" would fail for using the wrong
+    # synonym of a verb that was not the subject. The verb is the
+    # attribute only when the claim has no such noun ("founded in 1947").
+    noun = _quantity_noun(text, entity)
+    if noun:
+        return entity, noun, True
+    actions = _refute_actions(text)
+    if actions:
+        return entity, actions[0], True
+    if entity:
+        return entity, "", True
+    return "", "", False
+
+
+def _named_org(text: str) -> str:
+    """A known organisation written out, or its acronym in capitals.
+
+    The short form is matched only in capitals. "who" in a question is
+    not the World Health Organization. The long name is what a quote
+    that says "Reserve Bank of India" and a quote that says "RBI" share.
+    """
+    from misinfo_agent.prior_match import _KNOWN_ACRONYMS
+
+    folded = str(text or "").casefold()
+    for short, long in _KNOWN_ACRONYMS.items():
+        if re.search(rf"\b{re.escape(long)}\b", folded):
+            return long
+    for short, long in _KNOWN_ACRONYMS.items():
+        if re.search(rf"\b{re.escape(short.upper())}\b", text or ""):
+            return short.upper()
+    return ""
+
+
+def _refute_entity_name(text: str) -> str:
+    """The capital name, including a sentence-initial one.
+
+    The support matcher skips the first word of the sentence so that
+    "The" is not a person. "India has 45 states" then has no name at
+    all, and a quote about Nepal would pass on the word "states" alone.
+    Here the first word is the subject when nothing else was capitalised.
+    """
+    from misinfo_agent.prior_match import _NOT_A_NAME, _relaxed_entity
+
+    found = _relaxed_entity(text)
+    if found:
+        return found
+    raw = str(text or "").lstrip()
+    match = re.match(r"([A-Z][A-Za-z]{2,})\b", raw)
+    if not match:
+        return ""
+    word = match.group(1)
+    if word.casefold() in _NOT_A_NAME or word.casefold() in {"the", "this", "that", "there"}:
+        return ""
+    return word
+
+
+def _refute_actions(text: str) -> list[str]:
+    from misinfo_agent.prior_match import _action_words
+
+    return _action_words(text)
+
+
+def _quantity_noun(text: str, entity: str) -> str:
+    """The noun the figure is about, not the figure.
+
+    "45 states" gives "states". A year at the end of "founded in 1947"
+    gives "founded", because the word after the year is not the topic.
+    A month is part of the date, so "on 26 January 1950" looks backward
+    to the verb rather than taking "January" as the attribute.
+    """
+    match = re.search(r"\d[\d,]*(?:\.\d+)?", text or "")
+    if not match:
+        return ""
+    after = re.findall(r"[A-Za-z]+", text[match.end():])
+    if after and after[0].casefold() in _MONTHS:
+        return _word_before(text[: match.start()], entity)
+    for word in after:
+        if _content_token(word, entity):
+            return word.casefold()
+    return _word_before(text[: match.start()], entity)
+
+
+def _word_before(text: str, entity: str) -> str:
+    words = re.findall(r"[A-Za-z]+", text or "")
+    for word in reversed(words):
+        if _content_token(word, entity):
+            return word.casefold()
+    return ""
+
+
+def _content_token(word: str, entity: str) -> bool:
+    raw = word.casefold()
+    if raw in _REFUTE_FRAME or raw in _MONTHS:
+        return False
+    if len(raw) < 4 and not word.isupper():
+        return False
+    ent = (entity or "").casefold()
+    if ent and (raw == ent or raw in ent.split()):
+        return False
+    return True
+
+
+def _entity_in_refute(entity: str, text: str) -> bool:
+    """The name, its acronym, the short org name, or the adjective.
+
+    "Reserve Bank" is the Reserve Bank of India when the quote stops
+    before "of India". "Indian" is India. "Indiana" is not: the only
+    extra endings are the short ones that turn a country into its adjective.
+    """
+    from misinfo_agent.prior_match import _KNOWN_ACRONYMS, _entity_matches, _phrase_in, _word_in
+
+    if _entity_matches(entity, text):
+        return True
+    folded_ent = entity.casefold()
+    for short, long in _KNOWN_ACRONYMS.items():
+        if folded_ent not in {short, long}:
+            continue
+        if _word_in(text, short) or _phrase_in(text, long):
+            return True
+        head = long.split(" of ")[0]
+        if " " in head and _phrase_in(text, head):
+            return True
+    ent = folded_ent
+    if " " in ent or len(ent) < 4:
+        return False
+    for token in re.findall(r"[A-Za-z]+", text or ""):
+        folded = token.casefold()
+        if not folded.startswith(ent):
+            continue
+        if folded[len(ent):] in {"n", "ian", "ese", "i", "ish", "an"}:
+            return True
+    return False
+
+
+def _attribute_in_refute(word: str, text: str) -> bool:
+    """The same stem, an action synonym, or founded/established.
+
+    "states" and "state" share a stem. "founded" and "established" do
+    not, and the support synonym table does not list either, so the
+    founding class lives here. Adding it to the support list would make
+    a support quote say "founded" when the claim said "established".
+    """
+    from misinfo_agent.prior_match import _action_satisfied, _stem
+
+    if _action_satisfied(word, text):
+        return True
+    tokens = re.findall(r"[A-Za-z]+", text or "")
+    stem = _stem(word)
+    if any(_stem(token) == stem or token.casefold() == word.casefold() for token in tokens):
+        return True
+    group_stems = {_stem(item) for item in _FOUNDING}
+    if word.casefold() in _FOUNDING or stem in group_stems:
+        return any(token.casefold() in _FOUNDING or _stem(token) in group_stems for token in tokens)
+    return False
+
+
+# "total" is how a count is phrased ("in total"). It is not the thing
+# being counted. Months are part of a date, not the attribute.
+_REFUTE_FRAME = frozenset({
+    "total", "overall", "altogether", "currently", "present", "today",
+    "there", "their", "about", "after", "before", "which", "would",
+    "could", "should", "have", "been", "were", "will", "into", "over",
+    "under", "than", "then", "with", "from", "that", "this", "also",
+    "just", "only", "more", "most", "many", "some", "such", "other",
+    "first", "being", "every", "each", "where", "when", "what", "your",
+    "they", "them", "these", "those", "does", "did",
+})
+_MONTHS = frozenset({
+    "january", "jan", "february", "feb", "march", "mar", "april", "apr",
+    "may", "june", "jun", "july", "jul", "august", "aug", "september",
+    "sept", "sep", "october", "oct", "november", "nov", "december", "dec",
+})
+# Not in the support synonym table on purpose. See _attribute_in_refute.
+_FOUNDING = frozenset({
+    "found", "founded", "establish", "established", "formed", "form",
+    "created", "create", "creation",
+})
 
 
 def _weak_refute_groups(rows: list[dict], core_text: str) -> list[str]:

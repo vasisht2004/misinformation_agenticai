@@ -830,3 +830,43 @@ G2R-2 is on: `GATE_WEAK_REFUTE_2 = True`.
 
 "India has 29 states in total." replayed from the stored threads, same evidence, no new call. The 25 Nov 15:28 thread (`c7247e5413704575bccc7150ec692a0e`, raw text with the capital and the period) stays False under both gates: three lower-tier refuting groups and the cached refute kind. The later thread (`1ea7ddbad1b140548d4292d9c965081c`, raw text `india has 29 states in total`) is Unverifiable under the current gate (two refuting groups) and Misleading under G2R-2, with the lower-tier caveat.
 
+## Refute subject match pre-registered rule
+
+Written before the subject-match change was scored on the 16 established facts, the 50-claim eval, or the stored "India has 45 states in total." thread.
+
+Support quotes stay as they are. A support still has to carry the core's key terms after normalisation, including its numbers, dates, and amounts. A different figure is not support.
+
+A refute has to match the subject: the main entity and the attribute word (for example "India" and "states", or "RBI" and "founded"). It does not have to repeat the claim's number, date, or amount. A different value for that same attribute is a refutation. A quote about another country or another scheme does not match, and it does not count. A quote with no real words is left as box 7 stored it, because there is no subject in the quote to reject.
+
+Keep the change only if, on the 16 facts and the 50-claim eval combined, it adds zero new wrong 2-class decisions. A 2-class decision treats False and Misleading as the same "not true" label. True stays True. An abstention is not a wrong decision. A False/Misleading swap is not an extra 2-class error. A new wrong decision is a claim that was correct or abstained and becomes wrong. A claim that leaves the error list does not excuse a different claim joining it.
+
+The 16 facts are re-gated with the post-claim date guard off. The 50-claim eval is re-gated with the guard on. A reused prior keeps its stored verdict. A missing refute_kind stays Misleading. No new model call and no search for this score. The 45-states thread is re-gated on the same stored rows and reported beside the tables. It is not part of the keep-or-drop count.
+
+### Score
+
+Zero model calls and zero searches for the two sets. The before column is the shipped gate (G1, G2R, G2R-2, G3, relaxed core match, single tier-1 denial) on the stored evidence. The after column is that gate with the subject rule. Correct and wrong are 2-class.
+
+| set | gate | decided | correct | wrong |
+| --- | --- | --- | --- | --- |
+| 16 facts | before | 13 | 13 | 0 |
+| 16 facts | after | 13 | 13 | 0 |
+| 50-claim eval | before | 14 | 13 | 1 |
+| 50-claim eval | after | 10 | 9 | 1 |
+| combined | before | 27 | 26 | 1 |
+| combined | after | 23 | 22 | 1 |
+
+No fact changed. The one wrong 2-class decision on the 50-claim eval did not change: `0ab825964c1e`, gold Misleading, predicted True ("The first Australian-made orbital rocket Eris used an engine delivered by ISRO before crashing in 14 seconds."). Four claims moved from a correct not-true label to an abstention. That is not a new wrong decision.
+
+| set | id | gold | before | after |
+| --- | --- | --- | --- | --- |
+| 50-claim eval | e2230f5774ce | False | False | Unverifiable |
+| 50-claim eval | d021be8bdf6e | False | Misleading | Unverifiable |
+| 50-claim eval | 499379e42db6 | False | Misleading | Unverifiable |
+| 50-claim eval | 4b035555fded | Misleading | Misleading | Unverifiable |
+
+e2230f5774ce is "Astronomer CEO Andy Byron issued an apology letter blaming the Coldplay band after being caught on the kiss cam." d021be8bdf6e is "An AAIB report revealed the Air India plane crash was caused by unintended thrust reduction triggered by the captain's seat sliding backward." 499379e42db6 is "Singer Sonu Nigam posted on X criticizing MP Tejasvi Surya over the Kannada language dispute." 4b035555fded is "Users will be charged a fee for making UPI transactions over ₹2,000 via apps like Paytm, PhonePe, and Google Pay." The quotes that used to count do not name the subject the rule now requires, so those groups drop and the core is short of two.
+
+Combined wrong 2-class decisions stayed at 1. No claim that was correct or abstained became wrong. The change is kept.
+
+"India has 45 states in total." thread `c964ff2ffcb346d5a533c6de4dfb21ea`, same stored rows, no search. The state.gov quote does not name India, so that undated tier-1 row no longer counts and no longer blocks the others. Five lower-tier groups name India and states. The zero-call mapping, with the stored kind still empty, is Misleading and the lower-tier caveat, confidence capped at 0.5. One assess call was then allowed to set the kind, because the original draft was written while the gate was insufficient and the kind is dropped in that case. It returned `single_fact_wrong`. The card is False, confidence 0.5, caveat "Lower-tier sources only: no tier 1-2 source was found." Gate reasons: "A1 is refuted: 5 independent groups refute it, and none of them is tier 1 or 2." The search counter did not change.
+
