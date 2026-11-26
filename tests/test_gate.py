@@ -598,6 +598,141 @@ def test_stale_tier1_with_support_does_not_refute_the_true_count():
     assert out["atomic_status"]["A1"] == "insufficient"
 
 
+def test_undated_support_cannot_block_a_newer_refute_of_a_count():
+    # The stored "29 states" thread. Brainly is undated and says 29.
+    # The dated pages say 28. Brainly must not block the lower-tier path.
+    claim = "India has a total of 29 states."
+    atomic = [{"id": "A1", "text": claim, "core": True, "checkable": True}]
+    brainly = _row(
+        4, "brainly.in", "supports", 4, host="brainly.in",
+        quote="There are 29 states in India.",
+    )
+    byjus = _row(
+        5, "byjus.com", "refutes", 4, host="byjus.com",
+        quote="India has 28 states, and not 29 states.",
+    )
+    byjus["published_date"] = "2022-06-06"
+    latest = _row(
+        6, "anantamias.com", "refutes", 4, host="anantamias.com",
+        quote="India has 28 states and 8 Union Territories as of 2026.",
+    )
+    latest["published_date"] = "2026-04-22"
+    vedantu = _row(
+        8, "vedantu.com", "refutes", 4, host="vedantu.com",
+        quote="As of now, India has 28 States and 8 Union Territories.",
+    )
+    vedantu["published_date"] = "2025-06-07"
+    wiki = _row(
+        1, "en.wikipedia.org", "refutes", 3, host="en.wikipedia.org",
+        quote="India is a federal union comprising 28 states and 8 union territories.",
+    )
+    out = gate(_state(
+        claim=claim,
+        evidence=[wiki, brainly, byjus, latest, vedantu],
+        rounds=2,
+        atomic_claims=atomic,
+    ))
+    assert out["atomic_status"]["A1"] == "refuted"
+    assert "none of them is tier 1 or 2" in _joined(out)
+    assert config.WEAK_REFUTE_CAVEAT in _joined(out)
+    assert "supporting page may be outdated: brainly.in, undated" in _joined(out)
+
+
+def test_newest_dated_support_still_blocks_the_lower_tier_refute():
+    # The newest page agrees with the claim. It still blocks this path.
+    claim = "India has a total of 29 states."
+    atomic = [{"id": "A1", "text": claim, "core": True, "checkable": True}]
+    old = _row(
+        1, "byjus.com", "refutes", 4, host="byjus.com",
+        quote="India has 28 states, and not 29 states.",
+    )
+    old["published_date"] = "2022-06-06"
+    older = _row(
+        2, "vedantu.com", "refutes", 4, host="vedantu.com",
+        quote="As of now, India has 28 States and 8 Union Territories.",
+    )
+    older["published_date"] = "2020-01-01"
+    newest = _row(
+        3, "pib.gov.in", "supports", 4, host="pib.gov.in",
+        quote="There are 29 states in India.",
+    )
+    newest["published_date"] = "2026-04-22"
+    out = gate(_state(
+        claim=claim,
+        evidence=[old, older, newest],
+        rounds=2,
+        atomic_claims=atomic,
+    ))
+    assert out["atomic_status"]["A1"] == "insufficient"
+    assert "supporting page may be outdated" not in _joined(out)
+
+
+def test_past_tense_founding_does_not_drop_an_older_support():
+    # "was established in 1947" is not a present-tense count or office.
+    claim = "RBI was established in 1947."
+    atomic = [{"id": "A1", "text": claim, "core": True, "checkable": True}]
+    support = _row(
+        1, "archive.example", "supports", 4, host="archive.example",
+        quote="RBI was established in 1947.",
+    )
+    support["published_date"] = "1950-01-01"
+    first = _row(
+        2, "en.wikipedia.org", "refutes", 3, host="en.wikipedia.org",
+        quote="RBI was established in 1935.",
+    )
+    first["published_date"] = "2024-01-01"
+    second = _row(
+        3, "britannica.com", "refutes", 4, host="britannica.com",
+        quote="RBI was established in 1935.",
+    )
+    second["published_date"] = "2024-06-01"
+    out = gate(_state(
+        claim=claim,
+        evidence=[support, first, second],
+        rounds=2,
+        atomic_claims=atomic,
+    ))
+    assert out["atomic_status"]["A1"] == "insufficient"
+    assert "supporting page may be outdated" not in _joined(out)
+
+
+def test_f01_true_count_is_not_refuted():
+    # The newest dated page on the stored fact supports 28 states and 8
+    # union territories. That page keeps the lower-tier path closed.
+    path = Path(__file__).resolve().parents[1] / "data" / "eval" / "results_facts.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    f01 = gate(next(row["state"] for row in rows if row["id"] == "f01"))
+    assert f01["atomic_status"]["A1"] == "insufficient"
+
+    claim = "India has 28 states and 8 union territories."
+    atomic = [{"id": "A1", "text": claim, "core": True, "checkable": True}]
+    newest = _row(
+        7, "nextias.com", "supports", 4, host="nextias.com",
+        quote="There are 28 states and 8 union territories in India.",
+    )
+    newest["published_date"] = "2026-06-09"
+    wiki = _row(
+        2, "en.wikipedia.org", "supports", 3, host="en.wikipedia.org",
+        quote="India is a federal union comprising 28 states and 8 union territories",
+    )
+    old = _row(
+        1, "interstatecouncil.mha.gov.in", "refutes", 4, host="interstatecouncil.mha.gov.in",
+        quote="Today the republic of India comprises of 29 States and 7 Union Territories.",
+    )
+    old["published_date"] = "2019-01-01"
+    brainly = _row(
+        8, "brainly.in", "refutes", 4, host="brainly.in",
+        quote="India is divided into 28 states and 7 union territories",
+    )
+    out = gate(_state(
+        claim=claim,
+        evidence=[old, wiki, newest, brainly],
+        rounds=2,
+        atomic_claims=atomic,
+    ))
+    assert out["atomic_status"]["A1"] == "insufficient"
+
+
 def test_one_tier1_denial_refutes_only_when_the_flag_is_on(monkeypatch):
     claim = "RBI has banned ₹500 notes."
     evidence = [_row(1, "rbi.org.in", "refutes", 1, host="rbi.org.in")]

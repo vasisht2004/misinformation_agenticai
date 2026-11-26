@@ -224,8 +224,21 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
         rows = all_rows
     if config.TRUE_NEEDS_CORE_MATCH and _is_core(state, aid):
         rows, detail_ids = _split_core_supports(rows, text)
+    # Support decisions keep these rows. The cap below is only so an
+    # older supporting page cannot sit in the credible set and block a
+    # refute. A claim the refute paths leave open still uses this copy.
+    support_basis = [dict(row) for row in rows]
+    outdated_notes: list[str] = []
+    outdated_keys: set[str] = set()
+    if _present_status(text):
+        outdated_notes, outdated_keys = _outdated_supports(all_rows)
+        if outdated_keys:
+            rows = _cap_outdated_supports(rows, outdated_keys)
+            all_rows = _cap_outdated_supports(all_rows, outdated_keys)
     groups = _groups(rows)
+    basis = _groups(support_basis)
     reasons: list[str] = []
+    reasons.extend(outdated_notes)
     for name in groups["conflict"]:
         # Named so a reader can see which outlet was dropped, not just
         # that the count is smaller than the row count.
@@ -237,6 +250,13 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
     refute = groups["refute"]
     support_c = groups["support_credible"]
     refute_c = groups["refute_credible"]
+    # An outdated support still has a stance, so it remains in `support`
+    # for the tally. It must not be the page that stops a single denial.
+    blocking_support = [
+        name
+        for name in support
+        if not _group_outdated(rows, name, outdated_keys)
+    ]
     # stale_refute and stale_support were taken before the downgrade.
     # The groups above already count those pages as tier 3.
     conflicting, stray, because = _conflict(groups)
@@ -287,7 +307,7 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
         config.TIER1_SINGLE_REFUTE
         and _is_core(state, aid)
         and len(refute) == 1
-        and len(support) == 0
+        and len(blocking_support) == 0
         and groups["tier"].get(refute[0]) == _TIER1
         and not stale_refute
     ):
@@ -314,7 +334,14 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
     # lower. Either way a supporting page of any tier returns no groups,
     # and support is never decided on this path.
     if (config.GATE_WEAK_REFUTE or config.GATE_WEAK_REFUTE_2) and _is_core(state, aid):
-        weak = _weak_refute_groups(all_rows, text)
+        # Outdated supports are left out of this list. They still appear
+        # on the card. They do not count as the page that blocks G2R.
+        weak_rows = [
+            row
+            for row in all_rows
+            if not (row.get("stance") == "supports" and _row_key(row) in outdated_keys)
+        ]
+        weak = _weak_refute_groups(weak_rows, text)
         minimum = (
             config.WEAK_REFUTE_2_MIN_GROUPS
             if config.GATE_WEAK_REFUTE_2
@@ -339,20 +366,24 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
     # when the flag is off, still accepts one credible group plus any
     # second independent group.
     strict_support = config.TRUE_NEEDS_CORE_MATCH and _is_core(state, aid)
+    # `basis` is the pre-cap grouping. Capping an old support must not
+    # turn a claim this branch would have confirmed into an open one.
+    basis_support = basis["support"]
+    basis_support_c = basis["support_credible"]
     supported = (
-        len(support_c) >= 2 and not picture and not stale_support
+        len(basis_support_c) >= 2 and not picture and not stale_support
         if strict_support
-        else len(support) >= 2 and len(support_c) >= 1 and not picture and not stale_support
+        else len(basis_support) >= 2 and len(basis_support_c) >= 1 and not picture and not stale_support
     )
     if supported:
         if strict_support:
             line = (
-                f"{aid} is supported: {len(support_c)} independent tier 1 or 2 groups support it."
+                f"{aid} is supported: {len(basis_support_c)} independent tier 1 or 2 groups support it."
             )
         else:
             line = (
-                f"{aid} is supported: {len(support)} independent groups support it, "
-                f"and {len(support_c)} of them are tier 1 or 2."
+                f"{aid} is supported: {len(basis_support)} independent groups support it, "
+                f"and {len(basis_support_c)} of them are tier 1 or 2."
             )
         reasons.insert(0, line)
         return "supported", reasons, detail_ids
@@ -361,13 +392,16 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
     # their chance. This does not fire when a tier 1-2 group is opposed,
     # and it does not let text confirm a picture.
     if config.GATE_PRIMARY_SOURCE and _is_core(state, aid):
-        primary = _primary_side(rows, groups, text)
-        if primary == "refutes" and not stale_refute:
+        # Support uses the pre-cap rows, so an office page still confirms
+        # on the existing rule when the refute paths did not fire.
+        primary_refute = _primary_side(rows, groups, text)
+        primary_support = _primary_side(support_basis, basis, text)
+        if primary_refute == "refutes" and not stale_refute:
             host = _primary_host(rows, groups["refute"], text, "refutes")
             reasons.insert(0, f"{aid} is refuted: {host} is the body this claim is about.")
             return "refuted", reasons, detail_ids
-        if primary == "supports" and not picture and not stale_support:
-            host = _primary_host(rows, groups["support"], text, "supports")
+        if primary_support == "supports" and not picture and not stale_support:
+            host = _primary_host(support_basis, basis["support"], text, "supports")
             reasons.insert(0, f"{aid} is supported: {host} is the body this claim is about.")
             return "supported", reasons, detail_ids
     if stale_support:
@@ -402,9 +436,9 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
             return "supported", photo_lines + reasons, detail_ids
 
     picture_support = (
-        len(support_c) >= 2
+        len(basis_support_c) >= 2
         if strict_support
-        else len(support) >= 2 and len(support_c) >= 1
+        else len(basis_support) >= 2 and len(basis_support_c) >= 1
     )
     if picture and picture_support:
         # Text can still refute this claim, which is why the refute
@@ -412,7 +446,7 @@ def _judge(state: dict, atomic: dict, *, drop_after: bool) -> tuple[str, list[st
         reasons.insert(0, _PICTURE_BLOCK)
         reasons.insert(
             1,
-            f"{aid} has {len(support)} supporting groups, but they only describe the picture.",
+            f"{aid} has {len(basis_support)} supporting groups, but they only describe the picture.",
         )
         return "insufficient", reasons, detail_ids
 
@@ -1082,6 +1116,101 @@ _PRESENT_STATUS = re.compile(
 def _present_status(text: str) -> bool:
     """True when the sentence is about a current count, status, or office."""
     return _PRESENT_STATUS.search(str(text or "")) is not None
+
+
+def _row_day(row: dict):
+    """The publication day, or None when the row is undated."""
+    return _parse_day(row.get("published_date") or row.get("date"))
+
+
+def _row_host(row: dict) -> str:
+    """The site a reader can check, from netloc or the URL."""
+    host = str(row.get("netloc") or row.get("host") or "").strip()
+    if host:
+        return host
+    url = str(row.get("url") or "")
+    if "://" in url:
+        return url.split("/")[2]
+    return "unknown"
+
+
+def _row_key(row: dict) -> str:
+    """Stable identity for one evidence row across the copies the gate makes."""
+    evidence_id = str(row.get("id") or "").strip()
+    if evidence_id:
+        return evidence_id
+    return f"{row.get('url')}|{str(row.get('quote') or '')[:80]}"
+
+
+def _outdated_supports(rows: list[dict]) -> tuple[list[str], set[str]]:
+    """Support rows a newer dated denial outranks.
+
+    Called only for a present-tense claim. Undated is older than any
+    dated refute. A date earlier than the newest dated refute is older
+    too. A row that is the newest dated evidence on either side is left
+    out: that page still blocks. With no dated refute, nothing is
+    outdated, so the support rules are the ones already in _judge.
+    """
+    refute_days = []
+    all_days = []
+    for row in rows:
+        day = _row_day(row)
+        if day is None:
+            continue
+        all_days.append(day)
+        if row.get("stance") == "refutes":
+            refute_days.append(day)
+    if not refute_days:
+        return [], set()
+    newest_refute = max(refute_days)
+    newest_any = max(all_days)
+    notes: list[str] = []
+    keys: set[str] = set()
+    seen: set[str] = set()
+    for row in rows:
+        if row.get("stance") != "supports":
+            continue
+        day = _row_day(row)
+        # Tied for newest still blocks. Only a strictly older page,
+        # or an undated page beside a dated refute, is outdated.
+        if day is not None and day >= newest_any:
+            continue
+        if day is not None and day >= newest_refute:
+            continue
+        keys.add(_row_key(row))
+        label = day.isoformat() if day is not None else "undated"
+        sentence = f"supporting page may be outdated: {_row_host(row)}, {label}"
+        if sentence not in seen:
+            seen.add(sentence)
+            notes.append(sentence)
+    return notes, keys
+
+
+def _cap_outdated_supports(rows: list[dict], keys: set[str]) -> list[dict]:
+    """Copy the rows and count an outdated support as tier 3 at best.
+
+    Tier 4 stays tier 4. Tier 1 and tier 2 become tier 3, so the page
+    is not a credible group. The stance stays support: the card still
+    shows the page, and it still adds one vote. The copy is what the
+    refute paths group. The stored evidence is not rewritten.
+    """
+    copied = []
+    for row in rows:
+        item = dict(row)
+        if item.get("stance") == "supports" and _row_key(item) in keys and _tier(item) < 3:
+            item["tier"] = 3
+        copied.append(item)
+    return copied
+
+
+def _group_outdated(rows: list[dict], name: str, keys: set[str]) -> bool:
+    """True when every supporting member of this group is an outdated page."""
+    if not keys:
+        return False
+    members = [
+        row for row in rows if _row_group(row) == name and row.get("stance") == "supports"
+    ]
+    return bool(members) and all(_row_key(row) in keys for row in members)
 
 
 def _downgrade_stale_officials(rows: list[dict]) -> tuple[list[dict], list[str], list[str]]:
