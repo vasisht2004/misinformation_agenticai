@@ -306,7 +306,7 @@ SEARCH_CACHE_DIR = DATA_DIR / "cache" / "search"
 # with the UTC month, so the extra 200 is only for the rest of November.
 # A process that imported this before 1 Dec keeps 1000 until it restarts.
 _TAVILY_CAP_REVERTS = datetime(2026, 12, 1, tzinfo=timezone.utc)
-TAVILY_MONTHLY_MAX = 800 if datetime.now(timezone.utc) >= _TAVILY_CAP_REVERTS else 1000
+TAVILY_MONTHLY_MAX = 800 if datetime.now(timezone.utc) >= _TAVILY_CAP_REVERTS else 1076
 
 # Real searches one claim may start. The fixed plan is at most 5 queries,
 # so 8 leaves room for a retry without letting one claim spend the month.
